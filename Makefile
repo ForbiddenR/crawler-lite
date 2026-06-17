@@ -97,11 +97,11 @@ build: ## Build master and worker binaries into ./bin
 
 .PHONY: run-master
 run-master: ## Run the master locally (reads .env if present)
-	go run ./cmd/master
+	set -a; [ -f .env ] && . ./.env; set +a; go run ./cmd/master
 
 .PHONY: run-worker
-run-worker: ## Run a worker locally
-	go run ./cmd/worker
+run-worker: ## Run a worker locally (reads .env if present)
+	set -a; [ -f .env ] && . ./.env; set +a; go run ./cmd/worker
 
 .PHONY: tidy
 tidy: ## go mod tidy
