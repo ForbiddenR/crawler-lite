@@ -22,9 +22,9 @@ function Dashboard() {
       <h1 className="text-xl font-semibold">Dashboard</h1>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <StatCard label="Spiders" value={spiders.data?.items.length ?? 0} />
-        <StatCard label="Tasks" value={tasks.data?.items.length ?? 0} />
-        <StatCard label="Connected workers" value={workers.data?.items.length ?? 0} />
+        <StatCard label="Spiders" value={spiders.data?.items?.length ?? 0} />
+        <StatCard label="Tasks" value={tasks.data?.items?.length ?? 0} />
+        <StatCard label="Connected workers" value={workers.data?.items?.length ?? 0} />
       </div>
 
       <Card>
@@ -34,7 +34,7 @@ function Dashboard() {
         <CardBody>
           {workers.isLoading ? (
             <p className="text-sm text-zinc-500">Loading...</p>
-          ) : workers.data && workers.data.items.length > 0 ? (
+          ) : (workers.data?.items?.length ?? 0) > 0 ? (
             <table className="w-full text-sm">
               <thead className="text-left text-zinc-500">
                 <tr>
@@ -44,7 +44,7 @@ function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {workers.data.items.map((w) => (
+                {(workers.data?.items ?? []).map((w) => (
                   <tr key={w.session_id} className="border-t border-zinc-100">
                     <td className="py-2 font-mono text-xs">{w.worker_id}</td>
                     <td className="py-2 text-zinc-600">{w.capabilities.join(", ")}</td>
