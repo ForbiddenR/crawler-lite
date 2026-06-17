@@ -1,0 +1,32 @@
+# build artifacts
+/bin/
+/dist/
+
+# generated code
+/internal/pb/
+# (sqlc output goes here once enabled)
+/internal/repository/db/
+
+# env / secrets
+.env
+.env.local
+
+# logs
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+vendor/
+
+# node
+node_modules/
+web/dist/
+web/.vite/
+
+# Docker volumes (when using bind mounts)
+.data/

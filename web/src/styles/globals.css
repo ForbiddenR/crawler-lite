@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/* Tailwind v4: theme tokens go in CSS, not a JS config. */
+@theme {
+  --font-sans:
+    "InterVariable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

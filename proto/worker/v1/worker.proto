@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package crawler.worker.v1;
+
+option go_package = "github.com/yourteam/crawler-lite/internal/pb/worker/v1;workerv1";
+
+// WorkerHub is the entire master ↔ worker surface. One service, one method,
+// one bidi stream per worker. The worker initiates the connection.
+service WorkerHub {
+  rpc Connect(stream WorkerMsg) returns (stream MasterMsg);
+}
+
+// ---------------------------------------------------------------------------
+// Worker → master
+// ---------------------------------------------------------------------------
+message WorkerMsg {
+  oneof payload {
+    Hello       hello       = 1;   // first frame, identifies the worker
+    Heartbeat   heartbeat   = 2;   // periodic, includes load
+    TaskUpdate  task_update = 3;   // status transitions
+    LogLine     log_line    = 4;   // streamed during run
+    ItemEmitted item        = 5;   // structured output
+    ArtifactRef artifact    = 6;   // screenshot/HAR uploaded to MinIO
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Master → worker
+// ---------------------------------------------------------------------------
+message MasterMsg {
+  oneof payload {
+    Welcome    welcome = 1;        // ack of Hello
+    AssignTask assign  = 2;        // dispatch a task
+    CancelTask cancel  = 3;        // user clicked Cancel in UI
+    Ping       ping    = 4;        // liveness if heartbeat lapses
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+message Hello {
+  string worker_id            = 1;  // stable id (hostname or env)
+  string version              = 2;
+  int32  concurrency          = 3;
+  repeated string capabilities = 4; // ["python3.12","chromium","selenium"]
+  string shared_secret        = 5;  // simple bearer auth for now
+}
+
+message Welcome {
+  string session_id = 1;
+}
+
+message Heartbeat {
+  int32  running_tasks = 1;
+  int32  free_slots    = 2;
+  double cpu_pct       = 3;
+  double mem_pct       = 4;
+}
+
+message AssignTask {
+  int64  task_id        = 1;
+  int64  spider_id      = 2;
+  int32  spider_version = 3;
+  string source_key     = 4;        // MinIO key for spider source zip
+  bytes  config_json    = 5;        // serialized spider config
+  bytes  args_json      = 6;        // run-now arguments
+  string proxy_url      = 7;
+  int32  timeout_s      = 8;
+}
+
+message CancelTask {
+  int64 task_id = 1;
+}
+
+message Ping {
+  int64 nonce = 1;
+}
+
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  TASK_STATE_ACCEPTED    = 1;
+  TASK_STATE_RUNNING     = 2;
+  TASK_STATE_SUCCEEDED   = 3;
+  TASK_STATE_FAILED      = 4;
+  TASK_STATE_CANCELLED   = 5;
+  TASK_STATE_TIMEOUT     = 6;
+  TASK_STATE_CAPTCHA     = 7;
+}
+
+message TaskUpdate {
+  int64     task_id     = 1;
+  TaskState state       = 2;
+  string    error       = 3;
+  string    error_class = 4;
+}
+
+message LogLine {
+  int64  task_id = 1;
+  int64  ts_ns   = 2;
+  string level   = 3;
+  string message = 4;
+}
+
+message ItemEmitted {
+  int64 task_id      = 1;
+  bytes payload_json = 2;
+}
+
+message ArtifactRef {
+  int64  task_id     = 1;
+  string kind        = 2;           // "screenshot" | "har"
+  string storage_key = 3;
+  string name        = 4;
+  string url         = 5;
+  int32  width       = 6;
+  int32  height      = 7;
+  int32  bytes       = 8;
+}

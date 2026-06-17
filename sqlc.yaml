@@ -1,0 +1,22 @@
+# sqlc config (NOT WIRED IN WEEK 1).
+#
+# Week 1 uses raw pgx in internal/repository/*.go to keep the skeleton runnable
+# without a code-generation step. When the SQL surface grows, run:
+#
+#   go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+#   sqlc generate
+#
+# and migrate repos to use the generated `internal/repository/db` package.
+version: "2"
+sql:
+  - engine: postgresql
+    queries: db/queries
+    schema: db/migrations
+    gen:
+      go:
+        package: db
+        out: internal/repository/db
+        sql_package: pgx/v5
+        emit_json_tags: true
+        emit_pointers_for_null_types: true
+        emit_db_tags: true
