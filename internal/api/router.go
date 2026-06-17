@@ -1,5 +1,5 @@
-// Package api wires HTTP handlers behind a chi router. The router is the
-// only HTTP surface; handlers are organized by domain.
+// Package api wires HTTP handlers behind a Gin engine. The engine is the only
+// HTTP surface; handlers are organized by domain.
 //
 // All handlers receive their dependencies via the Handlers struct, which is
 // constructed once in app.Build. No global state.
@@ -8,10 +8,8 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gin-gonic/gin"
 
 	"github.com/yourteam/crawler-lite/internal/api/auth"
 	"github.com/yourteam/crawler-lite/internal/api/spiders"
@@ -32,17 +30,15 @@ type Handlers struct {
 }
 
 func NewRouter(h Handlers, log *slog.Logger) http.Handler {
-	r := chi.NewRouter()
+	gin.SetMode(gin.ReleaseMode)
 
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r := gin.New()
 	r.Use(slogRecoverer(log))
 	r.Use(slogLogger(log))
-	r.Use(middleware.Timeout(60 * time.Second))
-	r.Use(corsMiddleware) // dev-friendly; tighten for prod
+	r.Use(corsMiddleware()) // dev-friendly; tighten for prod
 
-	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok"))
+	r.GET("/healthz", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
 	})
 
 	authH := auth.NewHandler(h.Auth, log)
@@ -50,30 +46,31 @@ func NewRouter(h Handlers, log *slog.Logger) http.Handler {
 	tasksH := tasks.NewHandler(h.Tasks, log)
 	workersH := workers.NewHandler(h.Hub, log)
 
-	r.Route("/api", func(r chi.Router) {
+	api := r.Group("/api")
+	{
 		// public
-		r.Post("/auth/login", authH.Login)
+		api.POST("/auth/login", authH.Login)
 
 		// authed
-		r.Group(func(r chi.Router) {
-			r.Use(authMiddleware(h.Auth, log))
+		authed := api.Group("")
+		authed.Use(authMiddleware(h.Auth, log))
+		{
+			authed.GET("/auth/me", authH.Me)
 
-			r.Get("/auth/me", authH.Me)
+			authed.GET("/spiders", spidersH.List)
+			authed.POST("/spiders", spidersH.Create)
+			authed.GET("/spiders/:id", spidersH.Get)
+			authed.PATCH("/spiders/:id", spidersH.Update)
+			authed.DELETE("/spiders/:id", spidersH.Delete)
 
-			r.Get("/spiders", spidersH.List)
-			r.Post("/spiders", spidersH.Create)
-			r.Get("/spiders/{id}", spidersH.Get)
-			r.Patch("/spiders/{id}", spidersH.Update)
-			r.Delete("/spiders/{id}", spidersH.Delete)
+			authed.GET("/tasks", tasksH.List)
+			authed.POST("/tasks", tasksH.Create)
+			authed.GET("/tasks/:id", tasksH.Get)
+			authed.POST("/tasks/:id/cancel", tasksH.Cancel)
 
-			r.Get("/tasks", tasksH.List)
-			r.Post("/tasks", tasksH.Create)
-			r.Get("/tasks/{id}", tasksH.Get)
-			r.Post("/tasks/{id}/cancel", tasksH.Cancel)
-
-			r.Get("/workers", workersH.List)
-		})
-	})
+			authed.GET("/workers", workersH.List)
+		}
+	}
 
 	return r
 }

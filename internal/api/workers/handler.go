@@ -3,10 +3,12 @@
 package workers
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/yourteam/crawler-lite/internal/api/render"
 	"github.com/yourteam/crawler-lite/internal/hub"
 )
 
@@ -28,7 +30,7 @@ type workerView struct {
 	Running      int32    `json:"running"`
 }
 
-func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) List(c *gin.Context) {
 	sessions := h.hub.Sessions()
 	out := make([]workerView, 0, len(sessions))
 	for _, s := range sessions {
@@ -41,7 +43,5 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Running:      s.RunningTasks,
 		})
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": out})
+	render.JSON(c, http.StatusOK, gin.H{"items": out})
 }

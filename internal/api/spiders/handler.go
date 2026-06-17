@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
+	"github.com/yourteam/crawler-lite/internal/api/render"
 	"github.com/yourteam/crawler-lite/internal/spider"
 )
 
@@ -36,35 +37,35 @@ type updateReq struct {
 	Config      map[string]any `json:"config"`
 }
 
-func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	out, err := h.svc.List(r.Context())
+func (h *Handler) List(c *gin.Context) {
+	out, err := h.svc.List(c.Request.Context())
 	if err != nil {
 		h.log.Error("list spiders", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to list")
+		render.Error(c, http.StatusInternalServerError, "failed to list")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	render.JSON(c, http.StatusOK, gin.H{"items": out})
 }
 
-func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+func (h *Handler) Get(c *gin.Context) {
+	id, ok := pathInt64(c, "id")
 	if !ok {
 		return
 	}
-	s, err := h.svc.Get(r.Context(), id)
+	s, err := h.svc.Get(c.Request.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "spider not found")
+		render.Error(c, http.StatusNotFound, "spider not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s)
+	render.JSON(c, http.StatusOK, s)
 }
 
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Create(c *gin.Context) {
 	var req createReq
-	if !decode(w, r, &req) {
+	if !render.Decode(c, &req) {
 		return
 	}
-	s, err := h.svc.Create(r.Context(), spider.CreateInput{
+	s, err := h.svc.Create(c.Request.Context(), spider.CreateInput{
 		Name:        req.Name,
 		Description: req.Description,
 		EntryModule: req.EntryModule,
@@ -72,26 +73,26 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, spider.ErrInvalidInput) {
-			writeError(w, http.StatusBadRequest, "name and entry_module are required")
+			render.Error(c, http.StatusBadRequest, "name and entry_module are required")
 			return
 		}
 		h.log.Error("create spider", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create")
+		render.Error(c, http.StatusInternalServerError, "failed to create")
 		return
 	}
-	writeJSON(w, http.StatusCreated, s)
+	render.JSON(c, http.StatusCreated, s)
 }
 
-func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+func (h *Handler) Update(c *gin.Context) {
+	id, ok := pathInt64(c, "id")
 	if !ok {
 		return
 	}
 	var req updateReq
-	if !decode(w, r, &req) {
+	if !render.Decode(c, &req) {
 		return
 	}
-	s, err := h.svc.Update(r.Context(), id, spider.UpdateInput{
+	s, err := h.svc.Update(c.Request.Context(), id, spider.UpdateInput{
 		Name:        req.Name,
 		Description: req.Description,
 		EntryModule: req.EntryModule,
@@ -99,29 +100,28 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		Config:      req.Config,
 	})
 	if err != nil {
-		writeError(w, http.StatusNotFound, "spider not found")
+		render.Error(c, http.StatusNotFound, "spider not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s)
+	render.JSON(c, http.StatusOK, s)
 }
 
-func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+func (h *Handler) Delete(c *gin.Context) {
+	id, ok := pathInt64(c, "id")
 	if !ok {
 		return
 	}
-	if err := h.svc.Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete failed")
+	if err := h.svc.Delete(c.Request.Context(), id); err != nil {
+		render.Error(c, http.StatusInternalServerError, "delete failed")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	c.Status(http.StatusNoContent)
 }
 
-func pathInt64(w http.ResponseWriter, r *http.Request, key string) (int64, bool) {
-	raw := chi.URLParam(r, key)
-	id, err := strconv.ParseInt(raw, 10, 64)
+func pathInt64(c *gin.Context, key string) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param(key), 10, 64)
 	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid "+key)
+		render.Error(c, http.StatusBadRequest, "invalid "+key)
 		return 0, false
 	}
 	return id, true

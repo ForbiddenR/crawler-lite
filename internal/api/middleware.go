@@ -1,100 +1,93 @@
 package api
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gin-gonic/gin"
 
+	"github.com/yourteam/crawler-lite/internal/api/render"
 	"github.com/yourteam/crawler-lite/internal/auth"
 )
 
-type ctxKey int
-
-const (
-	ctxKeyClaims ctxKey = iota + 1
-)
+// ctxKeyClaims is the gin.Context key under which verified claims are stored.
+const ctxKeyClaims = "auth.claims"
 
 // claimsFrom returns the auth claims attached by authMiddleware, or nil.
-func claimsFrom(ctx context.Context) *auth.Claims {
-	v, _ := ctx.Value(ctxKeyClaims).(*auth.Claims)
-	return v
+func claimsFrom(c *gin.Context) *auth.Claims {
+	v, ok := c.Get(ctxKeyClaims)
+	if !ok {
+		return nil
+	}
+	claims, _ := v.(*auth.Claims)
+	return claims
 }
 
-// authMiddleware verifies a Bearer token and attaches its claims to the request
-// context. Endpoints under r.Group with this middleware can rely on claims
-// being present.
-func authMiddleware(svc *auth.Service, log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := r.Header.Get("Authorization")
-			if !strings.HasPrefix(h, "Bearer ") {
-				writeError(w, http.StatusUnauthorized, "missing bearer token")
-				return
-			}
-			tok := strings.TrimPrefix(h, "Bearer ")
-			claims, err := svc.VerifyToken(tok)
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid token")
-				return
-			}
-			ctx := context.WithValue(r.Context(), ctxKeyClaims, &claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+// authMiddleware verifies a Bearer token and attaches its claims to the gin
+// context. Handlers behind this middleware can rely on claimsFrom being non-nil.
+func authMiddleware(svc *auth.Service, _ *slog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h := c.GetHeader("Authorization")
+		if !strings.HasPrefix(h, "Bearer ") {
+			render.Error(c, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
+		tok := strings.TrimPrefix(h, "Bearer ")
+		claims, err := svc.VerifyToken(tok)
+		if err != nil {
+			render.Error(c, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		c.Set(ctxKeyClaims, &claims)
+		c.Next()
 	}
 }
 
-// slogLogger replaces chi's default text logger with a slog one-liner per
-// request, including duration and status code.
-func slogLogger(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-			start := time.Now()
-			next.ServeHTTP(ww, r)
-			log.Info("http",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", ww.Status(),
-				"bytes", ww.BytesWritten(),
-				"dur_ms", time.Since(start).Milliseconds(),
-			)
-		})
+// slogLogger emits one structured log line per request with duration and status.
+func slogLogger(log *slog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		log.Info("http",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"bytes", c.Writer.Size(),
+			"dur_ms", time.Since(start).Milliseconds(),
+		)
 	}
 }
 
-func slogRecoverer(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Error("panic",
-						"path", r.URL.Path,
-						"recover", rec,
-						"stack", string(debug.Stack()),
-					)
-					writeError(w, http.StatusInternalServerError, "internal error")
-				}
-			}()
-			next.ServeHTTP(w, r)
-		})
+// slogRecoverer turns a panic into a 500 and logs the stack.
+func slogRecoverer(log *slog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("panic",
+					"path", c.Request.URL.Path,
+					"recover", rec,
+					"stack", string(debug.Stack()),
+				)
+				render.Error(c, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		c.Next()
 	}
 }
 
 // corsMiddleware: dev-friendly. Allows any origin; tighten for production.
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization,Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type")
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }

@@ -5,7 +5,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/yourteam/crawler-lite/internal/api/render"
 	authsvc "github.com/yourteam/crawler-lite/internal/auth"
 )
 
@@ -35,29 +39,29 @@ type userResponse struct {
 	Name  string       `json:"display_name,omitempty"`
 }
 
-func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Login(c *gin.Context) {
 	var req loginReq
-	if !decode(w, r, &req) {
+	if !render.Decode(c, &req) {
 		return
 	}
 	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "email and password required")
+		render.Error(c, http.StatusBadRequest, "email and password required")
 		return
 	}
-	tok, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
+	tok, u, err := h.svc.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, authsvc.ErrInvalidCredentials):
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			render.Error(c, http.StatusUnauthorized, "invalid credentials")
 		case errors.Is(err, authsvc.ErrInactive):
-			writeError(w, http.StatusForbidden, "account inactive")
+			render.Error(c, http.StatusForbidden, "account inactive")
 		default:
 			h.log.Error("login error", "err", err)
-			writeError(w, http.StatusInternalServerError, "login failed")
+			render.Error(c, http.StatusInternalServerError, "login failed")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, loginResp{
+	render.JSON(c, http.StatusOK, loginResp{
 		Token: tok,
 		User: userResponse{
 			ID: u.ID, Email: u.Email, Role: u.Role, Name: u.DisplayName,
@@ -68,18 +72,26 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 // Me returns the current user's profile. The Authorization Bearer token has
 // already been verified by api.authMiddleware; we re-fetch the user so a
 // recent deactivation takes effect immediately.
-func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
-	tok := tokenFromRequest(r)
+func (h *Handler) Me(c *gin.Context) {
+	tok := tokenFromHeader(c)
 	if tok == "" {
-		writeError(w, http.StatusUnauthorized, "missing token")
+		render.Error(c, http.StatusUnauthorized, "missing token")
 		return
 	}
-	u, err := h.svc.CurrentUser(r.Context(), tok)
+	u, err := h.svc.CurrentUser(c.Request.Context(), tok)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "user not found")
+		render.Error(c, http.StatusUnauthorized, "user not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, userResponse{
+	render.JSON(c, http.StatusOK, userResponse{
 		ID: u.ID, Email: u.Email, Role: u.Role, Name: u.DisplayName,
 	})
+}
+
+func tokenFromHeader(c *gin.Context) string {
+	h := c.GetHeader("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(h, "Bearer ")
 }

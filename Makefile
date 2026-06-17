@@ -7,8 +7,14 @@ SHELL := /bin/bash
 PROTOC_GEN_GO_VERSION      := v1.36.0
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 GOOSE_VERSION              := v3.22.1
+PROTOC_VERSION             := 27.3
 
 GOBIN ?= $(shell go env GOPATH)/bin
+
+# protoc release asset: map `uname -m` to the names protobuf publishes.
+PROTOC_ARCH := $(shell uname -m | sed -e 's/x86_64/x86_64/' -e 's/aarch64/aarch_64/' -e 's/arm64/aarch_64/')
+PROTOC_ZIP  := protoc-$(PROTOC_VERSION)-linux-$(PROTOC_ARCH).zip
+PROTOC_URL  := https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/$(PROTOC_ZIP)
 
 # ---------------------------------------------------------------------------
 # Generated code paths
@@ -31,10 +37,21 @@ help: ## Show this help
 # Dev tools
 # ---------------------------------------------------------------------------
 .PHONY: tools
-tools: ## Install Go protoc plugins and goose locally
+tools: install-protoc ## Install protoc, Go protoc plugins, and goose locally
 	GOBIN=$(GOBIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	GOBIN=$(GOBIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 	GOBIN=$(GOBIN) go install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
+
+.PHONY: install-protoc
+install-protoc: ## Install the latest protoc into /usr/local (Linux only)
+	@command -v protoc >/dev/null 2>&1 && { echo "protoc already installed: $$(protoc --version)"; exit 0; } || true
+	@command -v unzip >/dev/null 2>&1 || { echo "error: 'unzip' is required (apt install -y unzip)"; exit 1; }
+	@echo "installing protoc $(PROTOC_VERSION) for linux-$(PROTOC_ARCH)"
+	@tmp=$$(mktemp -d) && \
+		curl -fLo "$$tmp/$(PROTOC_ZIP)" "$(PROTOC_URL)" && \
+		sudo unzip -o "$$tmp/$(PROTOC_ZIP)" -d /usr/local 'bin/protoc' 'include/*' && \
+		rm -rf "$$tmp" && \
+		protoc --version
 
 # ---------------------------------------------------------------------------
 # Code generation

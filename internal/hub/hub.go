@@ -165,12 +165,12 @@ func (h *WorkerHub) readLoop(ctx context.Context, sess *Session, stream pb.Worke
 			return err
 		}
 		switch p := msg.Payload.(type) {
-		case *pb.WorkerMsg_Hello_:
+		case *pb.WorkerMsg_Hello:
 			h.log.Warn("unexpected Hello after registration", "session", sess.SessionID)
-		case *pb.WorkerMsg_Heartbeat_:
+		case *pb.WorkerMsg_Heartbeat:
 			sess.RunningTasks = p.Heartbeat.RunningTasks
 			sess.FreeSlots = p.Heartbeat.FreeSlots
-		case *pb.WorkerMsg_TaskUpdate_:
+		case *pb.WorkerMsg_TaskUpdate:
 			if h.taskSvc != nil {
 				_ = h.taskSvc.OnUpdate(ctx,
 					p.TaskUpdate.TaskId,
@@ -180,16 +180,16 @@ func (h *WorkerHub) readLoop(ctx context.Context, sess *Session, stream pb.Worke
 					sess.WorkerID,
 				)
 			}
-		case *pb.WorkerMsg_LogLine_:
+		case *pb.WorkerMsg_LogLine:
 			// Week 2: forward to LogSink. For now, just log on the master.
 			h.log.Debug("worker log",
 				"task", p.LogLine.TaskId,
 				"level", p.LogLine.Level,
 				"msg", p.LogLine.Message,
 			)
-		case *pb.WorkerMsg_Item_:
+		case *pb.WorkerMsg_Item:
 			h.log.Debug("worker item", "task", p.Item.TaskId, "bytes", len(p.Item.PayloadJson))
-		case *pb.WorkerMsg_Artifact_:
+		case *pb.WorkerMsg_Artifact:
 			h.log.Debug("worker artifact", "task", p.Artifact.TaskId, "kind", p.Artifact.Kind, "key", p.Artifact.StorageKey)
 		default:
 			h.log.Warn("unknown WorkerMsg payload", "session", sess.SessionID)

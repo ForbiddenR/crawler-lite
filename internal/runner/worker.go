@@ -106,7 +106,7 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 
 	// Send Hello.
 	if err := stream.Send(&pb.WorkerMsg{
-		Payload: &pb.WorkerMsg_Hello_{
+		Payload: &pb.WorkerMsg_Hello{
 			Hello: &pb.Hello{
 				WorkerId:     w.cfg.WorkerID,
 				Version:      "0.1.0",
@@ -227,7 +227,7 @@ func (w *Worker) cancelTask(taskID int64) {
 
 func (w *Worker) sendUpdate(taskID int64, state pb.TaskState, errMsg string) {
 	w.outbox <- &pb.WorkerMsg{
-		Payload: &pb.WorkerMsg_TaskUpdate_{
+		Payload: &pb.WorkerMsg_TaskUpdate{
 			TaskUpdate: &pb.TaskUpdate{
 				TaskId: taskID, State: state, Error: errMsg,
 			},
@@ -244,7 +244,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.outbox <- &pb.WorkerMsg{
-				Payload: &pb.WorkerMsg_Heartbeat_{
+				Payload: &pb.WorkerMsg_Heartbeat{
 					Heartbeat: &pb.Heartbeat{
 						RunningTasks: w.runningCount.Load(),
 						FreeSlots:    w.freeSlots.Load(),

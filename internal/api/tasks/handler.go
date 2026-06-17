@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
+	"github.com/yourteam/crawler-lite/internal/api/render"
 	"github.com/yourteam/crawler-lite/internal/task"
 )
 
@@ -25,41 +26,41 @@ type createReq struct {
 	Args     map[string]any `json:"args,omitempty"`
 }
 
-func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	out, err := h.svc.List(r.Context(), limit, offset)
+func (h *Handler) List(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	out, err := h.svc.List(c.Request.Context(), limit, offset)
 	if err != nil {
 		h.log.Error("list tasks", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to list")
+		render.Error(c, http.StatusInternalServerError, "failed to list")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	render.JSON(c, http.StatusOK, gin.H{"items": out})
 }
 
-func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+func (h *Handler) Get(c *gin.Context) {
+	id, ok := pathInt64(c, "id")
 	if !ok {
 		return
 	}
-	t, err := h.svc.Get(r.Context(), id)
+	t, err := h.svc.Get(c.Request.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "task not found")
+		render.Error(c, http.StatusNotFound, "task not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	render.JSON(c, http.StatusOK, t)
 }
 
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Create(c *gin.Context) {
 	var req createReq
-	if !decode(w, r, &req) {
+	if !render.Decode(c, &req) {
 		return
 	}
 	if req.SpiderID == 0 {
-		writeError(w, http.StatusBadRequest, "spider_id required")
+		render.Error(c, http.StatusBadRequest, "spider_id required")
 		return
 	}
-	t, err := h.svc.Queue(r.Context(), task.CreateInput{
+	t, err := h.svc.Queue(c.Request.Context(), task.CreateInput{
 		SpiderID:      req.SpiderID,
 		Trigger:       task.TriggerManual,
 		SpiderVersion: 1,
@@ -67,30 +68,29 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.log.Error("queue task", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to queue")
+		render.Error(c, http.StatusInternalServerError, "failed to queue")
 		return
 	}
-	writeJSON(w, http.StatusCreated, t)
+	render.JSON(c, http.StatusCreated, t)
 }
 
-func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+func (h *Handler) Cancel(c *gin.Context) {
+	id, ok := pathInt64(c, "id")
 	if !ok {
 		return
 	}
-	if err := h.svc.Cancel(r.Context(), id); err != nil {
+	if err := h.svc.Cancel(c.Request.Context(), id); err != nil {
 		h.log.Error("cancel task", "err", err)
-		writeError(w, http.StatusInternalServerError, "cancel failed")
+		render.Error(c, http.StatusInternalServerError, "cancel failed")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	c.Status(http.StatusNoContent)
 }
 
-func pathInt64(w http.ResponseWriter, r *http.Request, key string) (int64, bool) {
-	raw := chi.URLParam(r, key)
-	id, err := strconv.ParseInt(raw, 10, 64)
+func pathInt64(c *gin.Context, key string) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param(key), 10, 64)
 	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid "+key)
+		render.Error(c, http.StatusBadRequest, "invalid "+key)
 		return 0, false
 	}
 	return id, true
