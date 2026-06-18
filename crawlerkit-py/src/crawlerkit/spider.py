@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _events
-from .browser import MockDriver
+from .browser import make_driver
 
 
 class Spider:
@@ -59,24 +59,29 @@ class Spider:
     # ---- convenience helpers ----------------------------------------------
 
     @contextmanager
-    def driver(self, *, stealth: bool = True, headless: bool = True):
+    def driver(self, *, stealth: bool = True, headless: bool = True, **kwargs: Any):
         """Yield a browser-like driver.
 
-        Week 2: MockDriver (records get/find calls; returns None / empty).
-        Week 3: real Selenium with selenium-wire + undetected-chromedriver.
+        By default returns a real Selenium-driven Chromium when the
+        ``selenium`` extra is installed; otherwise a recorded-call
+        :class:`~crawlerkit.browser.MockDriver`. Set ``CRAWLERKIT_DRIVER=mock``
+        to force the mock (e.g. in unit tests), or
+        ``CRAWLERKIT_DRIVER=selenium`` to fail loudly when the real driver
+        is unavailable.
 
-        The boolean flags are forwarded so spiders authored against the mock
-        will work unchanged once the real driver lands.
+        Extra ``**kwargs`` (``proxy``, ``user_agent``, ``binary``,
+        ``page_load_timeout``, ``script_timeout``, ``extra_args``) forward
+        to the real driver and are ignored by the mock.
         """
-        d = self._make_driver(stealth=stealth, headless=headless)
+        d = self._make_driver(stealth=stealth, headless=headless, **kwargs)
         try:
             yield d
         finally:
             d.quit()
 
-    def _make_driver(self, *, stealth: bool, headless: bool):
-        """Driver factory. Override in tests; week 3 swaps in real Selenium."""
-        return MockDriver(stealth=stealth, headless=headless)
+    def _make_driver(self, *, stealth: bool, headless: bool, **kwargs: Any):
+        """Driver factory hook. Override in tests to inject a fake driver."""
+        return make_driver(stealth=stealth, headless=headless, **kwargs)
 
     # ---- emit shortcuts ---------------------------------------------------
 

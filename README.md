@@ -13,14 +13,15 @@ What is here right now:
 - ✅ Go worker: subprocess executor (`python -m crawlerkit.runner`) over FD 3 JSONL,
   stdout/stderr forwarded as INFO/ERROR, source zip download from MinIO
 - ✅ Python `crawlerkit` SDK: `Spider` base class, `log` / `item` / `screenshot` /
-  `captcha` events, `MockDriver` for week 2
+  `captcha` events, real Selenium driver (Chromium via Selenium Manager) with
+  `MockDriver` fallback so authoring works without a browser installed
+- ✅ Schedules: cron-driven task creation with in-process daemon
 - ✅ React + Vite + TanStack Router + Tailwind v4: login, dashboard, spiders list +
-  detail, tasks list + detail with **live WS log tail**, items, screenshots gallery
+  detail, schedules list, tasks list + detail with **live WS log tail**, items, screenshots gallery
 
 What is **not** here yet (later weeks):
 
-- ❌ Real Selenium driver (using `MockDriver` for now)
-- ❌ Schedules, proxies, notifications, retries
+- ❌ Proxies, retries, notifications
 - ❌ HAR viewer / network tab
 - ❌ Production Dockerfiles, TLS reverse proxy
 

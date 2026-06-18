@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crawlerkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Crawler-lite spider SDK — Spider base class, FD3 event protocol, mock browser."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,9 +16,16 @@ dependencies = [
 
 [project.optional-dependencies]
 selenium = [
+    # Selenium 4.6+ ships Selenium Manager which auto-resolves chromedriver
+    # against the installed Chrome/Chromium binary, so we don't need
+    # webdriver-manager. For sites that need stronger evasion, pin
+    # `undetected-chromedriver` and `selenium-wire` in your spider repo —
+    # we don't bring them in by default because both are heavy and lag
+    # behind upstream Chromium releases.
     "selenium>=4.20",
-    "selenium-wire>=5.1",
-    "undetected-chromedriver>=3.5",
+]
+test = [
+    "pytest>=8",
 ]
 
 [tool.setuptools.packages.find]

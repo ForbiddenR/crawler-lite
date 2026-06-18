@@ -115,6 +115,14 @@ fmt: ## gofmt + goimports
 test: ## Run Go tests
 	go test ./...
 
+.PHONY: py-install
+py-install: ## Install crawlerkit (editable, with selenium + test extras)
+	python3 -m pip install -e crawlerkit-py[selenium,test]
+
+.PHONY: py-test
+py-test: ## Run crawlerkit-py tests
+	cd crawlerkit-py && python3 -m pytest -q
+
 # ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
