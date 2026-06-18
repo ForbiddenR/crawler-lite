@@ -1,23 +1,28 @@
 # crawler-lite
 
 A focused crawler platform for Python + Selenium spiders. Go master/worker,
-React UI. **Week-1 skeleton** — see [`../PLAN.md`](../PLAN.md) for the full
+React UI. **Week-2 in progress** — see [`../PLAN.md`](../PLAN.md) for the full
 design.
 
 What is here right now:
 
 - ✅ Postgres / Redis / MinIO via Docker Compose
-- ✅ Migrations for users, projects, spiders, tasks
-- ✅ Go master: HTTP API (login, spiders CRUD, tasks CRUD), gRPC server
-- ✅ Go worker: connects, sends `Hello`, prints `AssignTask` (no Python yet)
-- ✅ React + Vite + TanStack Router + Tailwind v4: login + dashboard
+- ✅ Migrations for users, projects, spiders, tasks, items, artifacts
+- ✅ Go master: HTTP API (login, spiders + git sync, tasks + items/screenshots/log),
+  gRPC server with task dispatcher, log pub/sub fan-out, MinIO log/artifact upload
+- ✅ Go worker: subprocess executor (`python -m crawlerkit.runner`) over FD 3 JSONL,
+  stdout/stderr forwarded as INFO/ERROR, source zip download from MinIO
+- ✅ Python `crawlerkit` SDK: `Spider` base class, `log` / `item` / `screenshot` /
+  `captcha` events, `MockDriver` for week 2
+- ✅ React + Vite + TanStack Router + Tailwind v4: login, dashboard, spiders list +
+  detail, tasks list + detail with **live WS log tail**, items, screenshots gallery
 
 What is **not** here yet (later weeks):
 
-- ❌ Python spider runtime / `crawlerkit` SDK
-- ❌ Selenium runner
+- ❌ Real Selenium driver (using `MockDriver` for now)
 - ❌ Schedules, proxies, notifications, retries
-- ❌ Run debug UI (logs / screenshots / HAR)
+- ❌ HAR viewer / network tab
+- ❌ Production Dockerfiles, TLS reverse proxy
 
 ---
 

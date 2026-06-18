@@ -1,4 +1,9 @@
+import { useAuthStore } from "@/stores/auth"
 import { api } from "./client"
+
+// ---------------------------------------------------------------------------
+// Spiders
+// ---------------------------------------------------------------------------
 
 export interface Spider {
   id: number
@@ -9,27 +14,51 @@ export interface Spider {
   entry_module: string
   source_version: number
   config: Record<string, unknown>
+  git_url?: string
+  git_branch?: string
+  last_synced_at?: string
+  last_sync_commit?: string
+  last_sync_error?: string
   created_at: string
   updated_at: string
+}
+
+export interface SpiderCreateInput {
+  name: string
+  description?: string
+  entry_module: string
+  config?: Record<string, unknown>
+  git_url?: string
+  git_branch?: string
 }
 
 export const spidersApi = {
   list: () => api<{ items: Spider[] }>("/api/spiders"),
   get: (id: number) => api<Spider>(`/api/spiders/${id}`),
+  create: (input: SpiderCreateInput) =>
+    api<Spider>("/api/spiders", { method: "POST", json: input }),
+  sync: (id: number) => api<Spider>(`/api/spiders/${id}/sync`, { method: "POST" }),
+  remove: (id: number) => api<void>(`/api/spiders/${id}`, { method: "DELETE" }),
 }
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timeout"
+  | "captcha_blocked"
 
 export interface Task {
   id: number
   spider_id: number
   trigger: "manual" | "schedule" | "retry" | "api"
-  status:
-    | "queued"
-    | "running"
-    | "succeeded"
-    | "failed"
-    | "cancelled"
-    | "timeout"
-    | "captcha_blocked"
+  status: TaskStatus
   spider_version: number
   worker_id?: string
   queued_at: string
@@ -37,6 +66,27 @@ export interface Task {
   finished_at?: string
   error?: string
   stats: Record<string, unknown>
+}
+
+export interface TaskItem {
+  id: number
+  task_id: number
+  spider_id: number
+  payload: unknown
+  payload_hash: string
+  created_at: string
+}
+
+export interface TaskScreenshot {
+  id: number
+  task_id: number
+  taken_at: string
+  name: string
+  url: string // presigned MinIO URL
+  page_url: string
+  width: number
+  height: number
+  bytes: number
 }
 
 export const tasksApi = {
@@ -48,7 +98,25 @@ export const tasksApi = {
       json: { spider_id: spiderId, args },
     }),
   cancel: (id: number) => api<void>(`/api/tasks/${id}/cancel`, { method: "POST" }),
+  items: (id: number, params?: { limit?: number; offset?: number }) =>
+    api<{ items: TaskItem[] }>(`/api/tasks/${id}/items`, { params }),
+  screenshots: (id: number) =>
+    api<{ items: TaskScreenshot[] }>(`/api/tasks/${id}/screenshots`),
+  /**
+   * Build a WebSocket URL for live log tail. The token comes in as a query
+   * param because browsers can't set Authorization headers on WS upgrades.
+   * In dev, vite proxies /api → backend with ws:true so this works seamlessly.
+   */
+  logStreamURL: (id: number): string => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+    const token = useAuthStore.getState().token ?? ""
+    return `${proto}//${window.location.host}/api/tasks/${id}/log/stream?token=${encodeURIComponent(token)}`
+  },
 }
+
+// ---------------------------------------------------------------------------
+// Workers
+// ---------------------------------------------------------------------------
 
 export interface Worker {
   worker_id: string

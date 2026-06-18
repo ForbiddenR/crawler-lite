@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import { Outlet, createFileRoute, redirect, useNavigate } from "@tanstack/react-router"
+import { Link, Outlet, createFileRoute, redirect, useNavigate } from "@tanstack/react-router"
 import { LogOut } from "lucide-react"
 
 import { authApi } from "@/api/auth"
@@ -36,6 +36,8 @@ function AuthedLayout() {
           <span className="font-semibold">crawler-lite</span>
           <nav className="flex gap-4 text-sm text-zinc-600">
             <NavLink to="/dashboard">Dashboard</NavLink>
+            <NavLink to="/spiders">Spiders</NavLink>
+            <NavLink to="/tasks">Tasks</NavLink>
           </nav>
         </div>
         <div className="flex items-center gap-3 text-sm text-zinc-600">
@@ -61,11 +63,15 @@ function AuthedLayout() {
 }
 
 function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
-  // Plain anchor for now — TanStack Router's <Link> would also work, but we
-  // only have one nav item in week 1.
+  // TanStack <Link> gives us active styling and prefetch — the routes are
+  // typed so the to=… literal is checked at compile time.
   return (
-    <a href={to} className="hover:text-zinc-900">
+    <Link
+      to={to}
+      className="hover:text-zinc-900"
+      activeProps={{ className: "text-zinc-900 font-medium" }}
+    >
       {children}
-    </a>
+    </Link>
   )
 }

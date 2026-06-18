@@ -26,9 +26,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Proxy API calls in dev so cookies/auth work without CORS pain.
+      // ws:true lets the WebSocket upgrade for /api/tasks/:id/log/stream
+      // pass through too.
       "/api": {
         target: "http://localhost:8000",
         changeOrigin: true,
+        ws: true,
       },
     },
   },
