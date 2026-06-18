@@ -130,3 +130,47 @@ export interface Worker {
 export const workersApi = {
   list: () => api<{ items: Worker[] }>("/api/workers"),
 }
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+export interface Schedule {
+  id: number
+  spider_id: number
+  name: string
+  cron_expr: string
+  args: Record<string, unknown>
+  enabled: boolean
+  last_run_at?: string
+  last_task_id?: number
+  next_run_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduleCreateInput {
+  spider_id: number
+  name: string
+  cron_expr: string
+  args?: Record<string, unknown>
+  enabled?: boolean
+}
+
+export interface ScheduleUpdateInput {
+  name: string
+  cron_expr: string
+  args?: Record<string, unknown>
+  enabled?: boolean
+}
+
+export const schedulesApi = {
+  list: () => api<{ items: Schedule[] }>("/api/schedules"),
+  get: (id: number) => api<Schedule>(`/api/schedules/${id}`),
+  create: (input: ScheduleCreateInput) =>
+    api<Schedule>("/api/schedules", { method: "POST", json: input }),
+  update: (id: number, input: ScheduleUpdateInput) =>
+    api<Schedule>(`/api/schedules/${id}`, { method: "PATCH", json: input }),
+  remove: (id: number) =>
+    api<void>(`/api/schedules/${id}`, { method: "DELETE" }),
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yourteam/crawler-lite/internal/api/auth"
+	"github.com/yourteam/crawler-lite/internal/api/schedules"
 	"github.com/yourteam/crawler-lite/internal/api/spiders"
 	"github.com/yourteam/crawler-lite/internal/api/tasks"
 	"github.com/yourteam/crawler-lite/internal/api/workers"
@@ -18,6 +19,7 @@ import (
 	"github.com/yourteam/crawler-lite/internal/cache"
 	"github.com/yourteam/crawler-lite/internal/hub"
 	"github.com/yourteam/crawler-lite/internal/repository"
+	schedulesvc "github.com/yourteam/crawler-lite/internal/schedule"
 	spidersvc "github.com/yourteam/crawler-lite/internal/spider"
 	"github.com/yourteam/crawler-lite/internal/storage"
 	tasksvc "github.com/yourteam/crawler-lite/internal/task"
@@ -26,10 +28,15 @@ import (
 // Deps is what NewRouter needs. Everything is a long-lived service or client
 // owned by app.App; the router does not construct anything itself.
 type Deps struct {
-	Auth    *authsvc.Service
-	Spiders *spidersvc.Service
-	Tasks   *tasksvc.Service
-	Hub     *hub.WorkerHub
+	Auth      *authsvc.Service
+	Spiders   *spidersvc.Service
+	Tasks     *tasksvc.Service
+	Schedules *schedulesvc.Service
+	// ScheduleRunner is the in-process cron daemon. Mutation handlers call
+	// Reload after Create / Update / Delete so the cron picks up changes
+	// immediately.
+	ScheduleRunner schedules.Runner
+	Hub            *hub.WorkerHub
 
 	// Tasks read endpoints + log WS need direct access to cache/storage/repos
 	// so they don't have to round-trip through services.
@@ -73,6 +80,12 @@ func NewRouter(d Deps, log *slog.Logger) http.Handler {
 	// WebSocket: token comes from ?token=, so it lives on the public api
 	// group and authenticates internally.
 	tasks.RegisterLogStream(api, taskDeps, d.Auth)
+
+	schedules.RegisterRoutes(authed, schedules.Deps{
+		Service: d.Schedules,
+		Runner:  d.ScheduleRunner,
+		Log:     log,
+	})
 
 	workers.RegisterRoutes(authed, d.Hub, log)
 

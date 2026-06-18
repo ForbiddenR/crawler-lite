@@ -27,6 +27,7 @@ import (
 	"github.com/yourteam/crawler-lite/internal/hub"
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 	"github.com/yourteam/crawler-lite/internal/repository"
+	"github.com/yourteam/crawler-lite/internal/schedule"
 	"github.com/yourteam/crawler-lite/internal/spider"
 	"github.com/yourteam/crawler-lite/internal/storage"
 	"github.com/yourteam/crawler-lite/internal/task"
@@ -48,15 +49,17 @@ type App struct {
 	repos *repository.Repos
 
 	// Services
-	auth    *auth.Service
-	spider  *spider.Service
-	task    *task.Service
-	logSink *hub.LogSinkPubsub // long-lived; flush goroutine started in Run
+	auth     *auth.Service
+	spider   *spider.Service
+	task     *task.Service
+	schedule *schedule.Service
+	logSink  *hub.LogSinkPubsub // long-lived; flush goroutine started in Run
 
 	// Network surface
-	hub        *hub.WorkerHub
-	httpServer *http.Server
-	grpcServer *grpc.Server
+	hub            *hub.WorkerHub
+	scheduleRunner *schedule.Runner
+	httpServer     *http.Server
+	grpcServer     *grpc.Server
 }
 
 // Build is the composition root. Read top-to-bottom.
@@ -126,15 +129,20 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	})
 	workerHub.BindTaskService(taskSvc)
 
+	scheduleSvc := schedule.NewService(repos.Schedules, log)
+	scheduleRunner := schedule.NewRunner(scheduleSvc, taskSvc, log)
+
 	// --- 5. Network surface ------------------------------------------------
 	router := api.NewRouter(api.Deps{
-		Auth:    authSvc,
-		Spiders: spiderSvc,
-		Tasks:   taskSvc,
-		Hub:     workerHub,
-		Cache:   cacheCli,
-		Store:   store,
-		Repos:   repos,
+		Auth:           authSvc,
+		Spiders:        spiderSvc,
+		Tasks:          taskSvc,
+		Schedules:      scheduleSvc,
+		ScheduleRunner: scheduleRunner,
+		Hub:            workerHub,
+		Cache:          cacheCli,
+		Store:          store,
+		Repos:          repos,
 	}, log)
 
 	httpServer := &http.Server{
@@ -151,14 +159,16 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	return &App{
 		cfg: cfg, log: log,
 		db: db, rdb: rdb, cache: cacheCli, mc: mc, store: store,
-		repos:      repos,
-		auth:       authSvc,
-		spider:     spiderSvc,
-		task:       taskSvc,
-		logSink:    logSink,
-		hub:        workerHub,
-		httpServer: httpServer,
-		grpcServer: grpcServer,
+		repos:          repos,
+		auth:           authSvc,
+		spider:         spiderSvc,
+		task:           taskSvc,
+		schedule:       scheduleSvc,
+		logSink:        logSink,
+		hub:            workerHub,
+		scheduleRunner: scheduleRunner,
+		httpServer:     httpServer,
+		grpcServer:     grpcServer,
 	}, nil
 }
 
@@ -168,6 +178,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	g.Go(func() error { return a.task.RunDispatcher(ctx) })
 	g.Go(func() error { return a.logSink.Run(ctx) })
+	g.Go(func() error { return a.scheduleRunner.Run(ctx) })
 
 	g.Go(func() error {
 		ln, err := net.Listen("tcp", a.cfg.GRPCAddr)

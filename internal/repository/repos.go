@@ -16,6 +16,7 @@ type Repos struct {
 	Tasks     *TaskRepo
 	Items     *ItemRepo
 	Artifacts *ArtifactsRepo
+	Schedules *ScheduleRepo
 }
 
 func New(pool *pgxpool.Pool) *Repos {
@@ -25,5 +26,6 @@ func New(pool *pgxpool.Pool) *Repos {
 		Tasks:     NewTaskRepo(pool),
 		Items:     NewItemRepo(pool),
 		Artifacts: NewArtifactsRepo(pool),
+		Schedules: NewScheduleRepo(pool),
 	}
 }

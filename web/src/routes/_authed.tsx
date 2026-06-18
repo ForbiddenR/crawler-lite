@@ -37,6 +37,7 @@ function AuthedLayout() {
           <nav className="flex gap-4 text-sm text-zinc-600">
             <NavLink to="/dashboard">Dashboard</NavLink>
             <NavLink to="/spiders">Spiders</NavLink>
+            <NavLink to="/schedules">Schedules</NavLink>
             <NavLink to="/tasks">Tasks</NavLink>
           </nav>
         </div>
