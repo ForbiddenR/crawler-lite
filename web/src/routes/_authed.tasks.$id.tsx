@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 
 import { type TaskStatus, tasksApi } from "@/api/resources"
 import { Button } from "@/components/ui/button"
-import { Card, CardBody, CardHeader } from "@/components/ui/card"
+import { Card, CardBody } from "@/components/ui/card"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { useTaskLogStream } from "@/hooks/useTaskLogStream"
 import { fmtDuration, fmtTime } from "@/lib/format"
