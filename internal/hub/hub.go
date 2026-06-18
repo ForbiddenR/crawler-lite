@@ -4,9 +4,6 @@
 // frame; the master answers with Welcome and registers the session. From then
 // on, the master pushes AssignTask / CancelTask / Ping; the worker pushes
 // Heartbeat / TaskUpdate / LogLine / ItemEmitted / ArtifactRef.
-//
-// Week 1: registry + Hello/Welcome + heartbeat counting + TaskUpdate routing.
-// Week 2 brings real assignment, log/item/artifact sinks.
 package hub
 
 import (
@@ -27,6 +24,28 @@ type TaskService interface {
 	OnUpdate(ctx context.Context, taskID int64, status task.Status, errMsg, errClass, workerID string) error
 }
 
+// Sinks bundles the side-effect handlers for the streamed worker output.
+// Constructed once in app.Build and passed in.
+type Sinks struct {
+	Log      LogSink
+	Item     ItemSink
+	Artifact ArtifactSink
+}
+
+// LogSink takes streamed log lines from a worker and persists / fans them out.
+// The implementation lives in sinks.go.
+type LogSink interface {
+	Write(ctx context.Context, line *pb.LogLine) error
+}
+
+type ItemSink interface {
+	Write(ctx context.Context, taskID, spiderID int64, payload []byte) error
+}
+
+type ArtifactSink interface {
+	Write(ctx context.Context, ref *pb.ArtifactRef) error
+}
+
 // Session represents a connected worker.
 type Session struct {
 	WorkerID     string
@@ -43,28 +62,37 @@ type Session struct {
 	running map[int64]struct{}
 }
 
+// taskMeta records the master's view of which task is on which worker, plus
+// the spider id (so the ItemSink can persist items without a second DB hit).
+type taskMeta struct {
+	sessionID string
+	spiderID  int64
+}
+
 // WorkerHub is the gRPC server.
 type WorkerHub struct {
 	pb.UnimplementedWorkerHubServer
 
-	log *slog.Logger
+	log   *slog.Logger
+	sinks Sinks
 
-	// resolved via BindTaskService after TaskService is constructed.
 	taskSvc TaskService
 
 	mu       sync.RWMutex
 	sessions map[string]*Session // keyed by session_id
+	tasks    map[int64]taskMeta  // task_id → metadata
 
-	// secret enforced if non-empty (week 1: optional)
 	sharedSecret string
 }
 
-// New constructs the hub. The shared secret is checked against Hello.shared_secret.
-// If empty, no auth is enforced (dev only).
-func New(log *slog.Logger) *WorkerHub {
+// New constructs the hub. Sinks are required (use no-op implementations in
+// tests if you don't care about side effects).
+func New(log *slog.Logger, sinks Sinks) *WorkerHub {
 	return &WorkerHub{
 		log:      log,
+		sinks:    sinks,
 		sessions: make(map[string]*Session),
+		tasks:    make(map[int64]taskMeta),
 	}
 }
 
@@ -74,7 +102,7 @@ func (h *WorkerHub) BindTaskService(s TaskService) { h.taskSvc = s }
 // SetSharedSecret enables auth. Empty disables.
 func (h *WorkerHub) SetSharedSecret(s string) { h.sharedSecret = s }
 
-// Sessions returns a snapshot of currently-connected workers (for /api/workers).
+// Sessions returns a snapshot of currently-connected workers.
 func (h *WorkerHub) Sessions() []*Session {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -145,7 +173,7 @@ func (h *WorkerHub) Connect(stream pb.WorkerHub_ConnectServer) error {
 		pumpDone <- h.pumpOutbox(streamCtx, sess, stream)
 	}()
 
-	// Inbound loop: read frames, dispatch by oneof type.
+	// Inbound loop.
 	if err := h.readLoop(streamCtx, sess, stream); err != nil {
 		cancel()
 		<-pumpDone
@@ -167,9 +195,11 @@ func (h *WorkerHub) readLoop(ctx context.Context, sess *Session, stream pb.Worke
 		switch p := msg.Payload.(type) {
 		case *pb.WorkerMsg_Hello:
 			h.log.Warn("unexpected Hello after registration", "session", sess.SessionID)
+
 		case *pb.WorkerMsg_Heartbeat:
 			sess.RunningTasks = p.Heartbeat.RunningTasks
 			sess.FreeSlots = p.Heartbeat.FreeSlots
+
 		case *pb.WorkerMsg_TaskUpdate:
 			if h.taskSvc != nil {
 				_ = h.taskSvc.OnUpdate(ctx,
@@ -180,17 +210,36 @@ func (h *WorkerHub) readLoop(ctx context.Context, sess *Session, stream pb.Worke
 					sess.WorkerID,
 				)
 			}
+			if isTerminal(p.TaskUpdate.State) {
+				h.releaseTask(sess, p.TaskUpdate.TaskId)
+			}
+
 		case *pb.WorkerMsg_LogLine:
-			// Week 2: forward to LogSink. For now, just log on the master.
-			h.log.Debug("worker log",
-				"task", p.LogLine.TaskId,
-				"level", p.LogLine.Level,
-				"msg", p.LogLine.Message,
-			)
+			if h.sinks.Log != nil {
+				if err := h.sinks.Log.Write(ctx, p.LogLine); err != nil {
+					h.log.Warn("log sink", "task", p.LogLine.TaskId, "err", err)
+				}
+			}
+
 		case *pb.WorkerMsg_Item:
-			h.log.Debug("worker item", "task", p.Item.TaskId, "bytes", len(p.Item.PayloadJson))
+			if h.sinks.Item != nil {
+				meta, ok := h.lookupTask(p.Item.TaskId)
+				if !ok {
+					h.log.Warn("item for unknown task", "task", p.Item.TaskId)
+					continue
+				}
+				if err := h.sinks.Item.Write(ctx, p.Item.TaskId, meta.spiderID, p.Item.PayloadJson); err != nil {
+					h.log.Warn("item sink", "task", p.Item.TaskId, "err", err)
+				}
+			}
+
 		case *pb.WorkerMsg_Artifact:
-			h.log.Debug("worker artifact", "task", p.Artifact.TaskId, "kind", p.Artifact.Kind, "key", p.Artifact.StorageKey)
+			if h.sinks.Artifact != nil {
+				if err := h.sinks.Artifact.Write(ctx, p.Artifact); err != nil {
+					h.log.Warn("artifact sink", "task", p.Artifact.TaskId, "err", err)
+				}
+			}
+
 		default:
 			h.log.Warn("unknown WorkerMsg payload", "session", sess.SessionID)
 		}
@@ -226,40 +275,68 @@ func (h *WorkerHub) unregister(s *Session) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.sessions, s.SessionID)
+	for tid, meta := range h.tasks {
+		if meta.sessionID == s.SessionID {
+			delete(h.tasks, tid)
+		}
+	}
 	close(s.outbox)
+}
+
+func (h *WorkerHub) lookupTask(taskID int64) (taskMeta, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	m, ok := h.tasks[taskID]
+	return m, ok
+}
+
+func (h *WorkerHub) releaseTask(sess *Session, taskID int64) {
+	sess.mu.Lock()
+	delete(sess.running, taskID)
+	if sess.FreeSlots < sess.Concurrency {
+		sess.FreeSlots++
+	}
+	sess.mu.Unlock()
+
+	h.mu.Lock()
+	delete(h.tasks, taskID)
+	h.mu.Unlock()
 }
 
 // ----------------------------------------------------------------------------
 // task.Hub interface (assignment + cancel)
 // ----------------------------------------------------------------------------
 
-// Assign is a stub for week 1 — picks the first session with free slots and
-// pushes an AssignTask. Real selection (least-loaded, capability filtering,
-// proxy attach) lands in week 2.
-func (h *WorkerHub) Assign(ctx context.Context, t *task.Task) (bool, error) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+// Assign picks the first worker with free slots, decrements its slot counter,
+// and pushes the AssignTask. Returns false if no worker has capacity.
+//
+// Worker selection is deliberately simple — first-fit. Least-loaded /
+// capability-aware selection lands when capacity becomes a concern.
+func (h *WorkerHub) Assign(ctx context.Context, a *pb.AssignTask) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for _, s := range h.sessions {
-		if s.FreeSlots > 0 {
-			s.mu.Lock()
-			s.running[t.ID] = struct{}{}
-			s.FreeSlots--
+		s.mu.Lock()
+		if s.FreeSlots <= 0 {
 			s.mu.Unlock()
-			select {
-			case s.outbox <- &pb.MasterMsg{
-				Payload: &pb.MasterMsg_Assign{
-					Assign: &pb.AssignTask{
-						TaskId:        t.ID,
-						SpiderId:      t.SpiderID,
-						SpiderVersion: t.SpiderVersion,
-						TimeoutS:      600,
-					},
-				},
-			}:
-				return true, nil
-			default:
-				// outbox full; try next worker
-			}
+			continue
+		}
+		s.running[a.TaskId] = struct{}{}
+		s.FreeSlots--
+		s.mu.Unlock()
+
+		select {
+		case s.outbox <- &pb.MasterMsg{
+			Payload: &pb.MasterMsg_Assign{Assign: a},
+		}:
+			h.tasks[a.TaskId] = taskMeta{sessionID: s.SessionID, spiderID: a.SpiderId}
+			return true, nil
+		default:
+			// Outbox full — undo our reservation and try the next worker.
+			s.mu.Lock()
+			delete(s.running, a.TaskId)
+			s.FreeSlots++
+			s.mu.Unlock()
 		}
 	}
 	return false, nil
@@ -268,23 +345,17 @@ func (h *WorkerHub) Assign(ctx context.Context, t *task.Task) (bool, error) {
 // CancelRunning broadcasts CancelTask to whichever worker is running this task.
 func (h *WorkerHub) CancelRunning(ctx context.Context, taskID int64) error {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, s := range h.sessions {
-		s.mu.Lock()
-		_, has := s.running[taskID]
-		s.mu.Unlock()
-		if !has {
-			continue
-		}
-		select {
-		case s.outbox <- &pb.MasterMsg{
-			Payload: &pb.MasterMsg_Cancel{
-				Cancel: &pb.CancelTask{TaskId: taskID},
-			},
-		}:
-		default:
-		}
+	meta, ok := h.tasks[taskID]
+	sess := h.sessions[meta.sessionID]
+	h.mu.RUnlock()
+	if !ok || sess == nil {
 		return nil
+	}
+	select {
+	case sess.outbox <- &pb.MasterMsg{
+		Payload: &pb.MasterMsg_Cancel{Cancel: &pb.CancelTask{TaskId: taskID}},
+	}:
+	default:
 	}
 	return nil
 }
@@ -306,4 +377,16 @@ func mapState(s pb.TaskState) task.Status {
 	default:
 		return task.StatusQueued
 	}
+}
+
+func isTerminal(s pb.TaskState) bool {
+	switch s {
+	case pb.TaskState_TASK_STATE_SUCCEEDED,
+		pb.TaskState_TASK_STATE_FAILED,
+		pb.TaskState_TASK_STATE_CANCELLED,
+		pb.TaskState_TASK_STATE_TIMEOUT,
+		pb.TaskState_TASK_STATE_CAPTCHA:
+		return true
+	}
+	return false
 }

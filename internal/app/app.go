@@ -23,6 +23,7 @@ import (
 	"github.com/yourteam/crawler-lite/internal/api"
 	"github.com/yourteam/crawler-lite/internal/auth"
 	"github.com/yourteam/crawler-lite/internal/cache"
+	"github.com/yourteam/crawler-lite/internal/gitsource"
 	"github.com/yourteam/crawler-lite/internal/hub"
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 	"github.com/yourteam/crawler-lite/internal/repository"
@@ -39,6 +40,7 @@ type App struct {
 	// Infrastructure
 	db    *pgxpool.Pool
 	rdb   *redis.Client
+	cache *cache.Client
 	mc    *minio.Client
 	store *storage.MinIOClient
 
@@ -46,9 +48,10 @@ type App struct {
 	repos *repository.Repos
 
 	// Services
-	auth   *auth.Service
-	spider *spider.Service
-	task   *task.Service
+	auth    *auth.Service
+	spider  *spider.Service
+	task    *task.Service
+	logSink *hub.LogSinkPubsub // long-lived; flush goroutine started in Run
 
 	// Network surface
 	hub        *hub.WorkerHub
@@ -76,8 +79,7 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("redis: %w", err)
 	}
-	// cache.Client wraps rdb; constructed in week 2 when first consumer arrives.
-	_ = cache.NewClient(rdb)
+	cacheCli := cache.NewClient(rdb)
 
 	mc, err := minio.New(cfg.MinIOEndpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.MinIOAccessKey, cfg.MinIOSecretKey, ""),
@@ -87,6 +89,9 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("minio: %w", err)
 	}
 	store := storage.NewMinIOClient(mc, cfg.MinIOBucket)
+	if err := store.EnsureBucket(ctx); err != nil {
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
 
 	// --- 2. Repositories ---------------------------------------------------
 	repos := repository.New(db)
@@ -96,19 +101,40 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	jwt := auth.NewJWTIssuer(cfg.JWTSecret, cfg.JWTTTL)
 	authSvc := auth.NewService(repos.Users, hasher, jwt, log)
 
-	spiderSvc := spider.NewService(repos.Spiders, store, log)
+	syncer := gitsource.New(store, log)
+	spiderSvc := spider.NewService(repos.Spiders, store, syncer, log)
 
-	// hub and task service have a controlled cycle; resolve via a setter.
-	workerHub := hub.New(log)
-	taskSvc := task.NewService(repos.Tasks, repos.Spiders, workerHub, log)
+	// --- 4. Hub + sinks (cycle resolved via setter) ------------------------
+	logSink := hub.NewLogSink(cacheCli, store, repos.Artifacts)
+	itemSink := hub.NewItemSink(repos.Items)
+	artifactSink := hub.NewArtifactSink(repos.Artifacts)
+
+	workerHub := hub.New(log, hub.Sinks{
+		Log:      logSink,
+		Item:     itemSink,
+		Artifact: artifactSink,
+	})
+	if cfg.WorkerSharedSecret != "" {
+		workerHub.SetSharedSecret(cfg.WorkerSharedSecret)
+	}
+
+	taskSvc := task.NewService(task.Deps{
+		Repo:    repos.Tasks,
+		Spiders: repos.Spiders,
+		Hub:     workerHub,
+		Log:     log,
+	})
 	workerHub.BindTaskService(taskSvc)
 
-	// --- 4. Network surface ------------------------------------------------
-	router := api.NewRouter(api.Handlers{
+	// --- 5. Network surface ------------------------------------------------
+	router := api.NewRouter(api.Deps{
 		Auth:    authSvc,
 		Spiders: spiderSvc,
 		Tasks:   taskSvc,
 		Hub:     workerHub,
+		Cache:   cacheCli,
+		Store:   store,
+		Repos:   repos,
 	}, log)
 
 	httpServer := &http.Server{
@@ -124,12 +150,13 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 
 	return &App{
 		cfg: cfg, log: log,
-		db: db, rdb: rdb, mc: mc, store: store,
-		repos:  repos,
-		auth:   authSvc,
-		spider: spiderSvc,
-		task:   taskSvc,
-		hub:    workerHub,
+		db: db, rdb: rdb, cache: cacheCli, mc: mc, store: store,
+		repos:      repos,
+		auth:       authSvc,
+		spider:     spiderSvc,
+		task:       taskSvc,
+		logSink:    logSink,
+		hub:        workerHub,
 		httpServer: httpServer,
 		grpcServer: grpcServer,
 	}, nil
@@ -138,6 +165,9 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 // Run blocks until ctx is cancelled or any long-lived component exits.
 func (a *App) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error { return a.task.RunDispatcher(ctx) })
+	g.Go(func() error { return a.logSink.Run(ctx) })
 
 	g.Go(func() error {
 		ln, err := net.Listen("tcp", a.cfg.GRPCAddr)

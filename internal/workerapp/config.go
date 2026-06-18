@@ -12,6 +12,19 @@ type Config struct {
 	Concurrency        int32  `env:"WORKER_CONCURRENCY" envDefault:"4"`
 	WorkerSharedSecret string `env:"WORKER_SHARED_SECRET,required"`
 
+	// MinIO — the worker downloads spider sources from here.
+	MinIOEndpoint  string `env:"MINIO_ENDPOINT,required"`
+	MinIOAccessKey string `env:"MINIO_ACCESS_KEY,required"`
+	MinIOSecretKey string `env:"MINIO_SECRET_KEY,required"`
+	MinIOBucket    string `env:"MINIO_BUCKET" envDefault:"crawler-artifacts"`
+	MinIOSecure    bool   `env:"MINIO_SECURE" envDefault:"false"`
+
+	// Path to the Python interpreter used to spawn `python -m crawlerkit.runner`.
+	PythonPath string `env:"PYTHON_PATH" envDefault:"python3"`
+
+	// Parent dir for per-task working dirs. Each task lands in a fresh subdir.
+	WorkDir string `env:"WORKER_WORKDIR" envDefault:"/tmp/crawler-lite"`
+
 	// Comma-separated, e.g. "python3.12,chromium,selenium"
 	CapabilitiesRaw string `env:"WORKER_CAPABILITIES" envDefault:"python3.12"`
 }

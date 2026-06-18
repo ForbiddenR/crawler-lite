@@ -1,13 +1,18 @@
-// Package task owns the TaskService — task creation, listing, status
-// transitions, and (in future weeks) the dispatch loop that hands tasks to
-// workers via the WorkerHub.
+// Package task owns the TaskService: queueing, listing, status transitions,
+// cancel, and the dispatch loop that hands queued tasks to workers via the
+// WorkerHub.
 package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
+
+	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
+	"github.com/yourteam/crawler-lite/internal/spider"
 )
 
 // Status mirrors the `task_status` enum in Postgres.
@@ -67,36 +72,58 @@ type Repository interface {
 	SetStatus(ctx context.Context, id int64, status Status, errMsg, errClass string, workerID string) error
 }
 
+// SpiderLookup is the slice of spider.Repository the dispatch loop needs to
+// build a complete pb.AssignTask. It's defined here, in the consumer.
+type SpiderLookup interface {
+	Get(ctx context.Context, id int64) (*spider.Spider, error)
+}
+
 // Hub is the slice of hub.WorkerHub we need to dispatch tasks. Defined as an
 // interface to avoid an import cycle and to make the dispatch loop testable.
+//
+// Assign takes a fully-built pb.AssignTask: the task package owns the
+// translation from domain Task + Spider into the wire message.
 type Hub interface {
-	// Assign attempts to dispatch a task to an available worker. Returns true
-	// if accepted, false if no worker has free capacity (caller should keep
-	// the task queued).
-	Assign(ctx context.Context, t *Task) (bool, error)
-
-	// CancelRunning best-effort signals a running worker to abort. Safe to call
-	// for tasks that aren't running anywhere.
+	Assign(ctx context.Context, a *pb.AssignTask) (bool, error)
 	CancelRunning(ctx context.Context, taskID int64) error
 }
 
+// Deps groups the dispatch-loop dependencies. A struct keeps the constructor
+// readable as the list grows.
+type Deps struct {
+	Repo    Repository
+	Spiders SpiderLookup
+	Hub     Hub
+	Log     *slog.Logger
+
+	// Default per-task timeout when the spider config doesn't specify one.
+	DefaultTimeoutSeconds int32
+}
+
 type Service struct {
-	repo Repository
-	hub  Hub
-	log  *slog.Logger
+	deps Deps
+
+	// wakeup is signalled by Queue() and ticked by RunDispatcher() so newly
+	// queued tasks dispatch immediately instead of waiting for the next poll.
+	wakeup chan struct{}
 }
 
-// NewService takes the things it needs. The dispatch loop and spider lookup
-// arrive in week 2; the placeholder _spiders parameter from the earlier draft
-// has been removed.
-func NewService(repo Repository, _ any, hub Hub, log *slog.Logger) *Service {
-	return &Service{repo: repo, hub: hub, log: log}
+func NewService(d Deps) *Service {
+	if d.DefaultTimeoutSeconds == 0 {
+		d.DefaultTimeoutSeconds = 600
+	}
+	return &Service{
+		deps:   d,
+		wakeup: make(chan struct{}, 1),
+	}
 }
 
-var ErrInvalidInput = errors.New("invalid input")
+var (
+	ErrInvalidInput = errors.New("invalid input")
+	ErrNoSource     = errors.New("spider has no synced source")
+)
 
-// Queue creates a task in `queued` state. The dispatch loop (week 2) picks it
-// up and asks the hub to assign.
+// Queue creates a task in `queued` state and pokes the dispatch loop.
 func (s *Service) Queue(ctx context.Context, in CreateInput) (*Task, error) {
 	if in.SpiderID == 0 {
 		return nil, ErrInvalidInput
@@ -104,14 +131,27 @@ func (s *Service) Queue(ctx context.Context, in CreateInput) (*Task, error) {
 	if in.Trigger == "" {
 		in.Trigger = TriggerManual
 	}
+	// SpiderVersion defaults to whatever the spider currently has.
 	if in.SpiderVersion == 0 {
-		in.SpiderVersion = 1
+		sp, err := s.deps.Spiders.Get(ctx, in.SpiderID)
+		if err != nil {
+			return nil, fmt.Errorf("lookup spider: %w", err)
+		}
+		if sp.SourceVersion == 0 {
+			return nil, ErrNoSource
+		}
+		in.SpiderVersion = sp.SourceVersion
 	}
-	return s.repo.Create(ctx, in)
+	t, err := s.deps.Repo.Create(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	s.notify()
+	return t, nil
 }
 
 func (s *Service) Get(ctx context.Context, id int64) (*Task, error) {
-	return s.repo.Get(ctx, id)
+	return s.deps.Repo.Get(ctx, id)
 }
 
 func (s *Service) List(ctx context.Context, limit, offset int) ([]*Task, error) {
@@ -121,21 +161,121 @@ func (s *Service) List(ctx context.Context, limit, offset int) ([]*Task, error) 
 	if offset < 0 {
 		offset = 0
 	}
-	return s.repo.List(ctx, limit, offset)
+	return s.deps.Repo.List(ctx, limit, offset)
 }
 
 // Cancel sets status to cancelled in the DB and signals the worker (if any).
-// Best-effort — the worker may have already finished by the time the signal
-// reaches it.
 func (s *Service) Cancel(ctx context.Context, id int64) error {
-	if err := s.repo.SetStatus(ctx, id, StatusCancelled, "cancelled by user", "", ""); err != nil {
+	if err := s.deps.Repo.SetStatus(ctx, id, StatusCancelled, "cancelled by user", "", ""); err != nil {
 		return err
 	}
-	return s.hub.CancelRunning(ctx, id)
+	return s.deps.Hub.CancelRunning(ctx, id)
 }
 
-// OnUpdate is called by the WorkerHub when it receives a TaskUpdate frame
-// from a worker. It just persists the new status; richer routing arrives later.
+// OnUpdate is called by the WorkerHub when it receives a TaskUpdate frame.
 func (s *Service) OnUpdate(ctx context.Context, taskID int64, status Status, errMsg, errClass, workerID string) error {
-	return s.repo.SetStatus(ctx, taskID, status, errMsg, errClass, workerID)
+	return s.deps.Repo.SetStatus(ctx, taskID, status, errMsg, errClass, workerID)
+}
+
+// notify wakes the dispatch loop. Non-blocking: if a wakeup is already
+// queued, this is a no-op.
+func (s *Service) notify() {
+	select {
+	case s.wakeup <- struct{}{}:
+	default:
+	}
+}
+
+// RunDispatcher is the long-lived goroutine that consumes queued tasks and
+// asks the hub to assign them. It wakes on:
+//   - explicit notify() from Queue
+//   - a 5s safety tick (catches updates that didn't go through Queue, e.g.
+//     a worker disconnect that re-queued tasks)
+//
+// Returns when ctx is cancelled.
+func (s *Service) RunDispatcher(ctx context.Context) error {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		s.dispatchOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-s.wakeup:
+		case <-tick.C:
+		}
+	}
+}
+
+func (s *Service) dispatchOnce(ctx context.Context) {
+	queued, err := s.deps.Repo.ListQueued(ctx)
+	if err != nil {
+		s.deps.Log.Error("dispatch: list queued", "err", err)
+		return
+	}
+	for _, t := range queued {
+		assign, err := s.buildAssign(ctx, t)
+		if err != nil {
+			s.deps.Log.Warn("dispatch: build assign",
+				"task", t.ID, "err", err)
+			// Surface the error on the task so the UI shows it.
+			_ = s.deps.Repo.SetStatus(ctx, t.ID, StatusFailed, err.Error(), "build_assign", "")
+			continue
+		}
+		ok, err := s.deps.Hub.Assign(ctx, assign)
+		if err != nil {
+			s.deps.Log.Error("dispatch: hub assign", "task", t.ID, "err", err)
+			continue
+		}
+		if !ok {
+			// All workers busy; leave the task queued and try next tick.
+			break
+		}
+		// The hub already pushed the message; the worker will report ACCEPTED →
+		// RUNNING which is what flips the row to running.
+	}
+}
+
+// buildAssign turns a queued Task + its Spider into the pb.AssignTask the hub
+// pushes to a worker.
+func (s *Service) buildAssign(ctx context.Context, t *Task) (*pb.AssignTask, error) {
+	sp, err := s.deps.Spiders.Get(ctx, t.SpiderID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup spider: %w", err)
+	}
+	if sp.SourceKey == "" {
+		return nil, ErrNoSource
+	}
+
+	configJSON, err := json.Marshal(map[string]any{
+		"entry_module": sp.EntryModule,
+		"config":       sp.Config,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+
+	argsJSON := []byte(`{}`)
+	if t.TriggeredArgs != nil {
+		argsJSON, err = json.Marshal(t.TriggeredArgs)
+		if err != nil {
+			return nil, fmt.Errorf("marshal args: %w", err)
+		}
+	}
+
+	timeout := s.deps.DefaultTimeoutSeconds
+	if v, ok := sp.Config["timeout_s"].(float64); ok && v > 0 {
+		timeout = int32(v)
+	}
+
+	return &pb.AssignTask{
+		TaskId:        t.ID,
+		SpiderId:      t.SpiderID,
+		SpiderVersion: t.SpiderVersion,
+		SourceKey:     sp.SourceKey,
+		ConfigJson:    configJSON,
+		ArgsJson:      argsJSON,
+		ProxyUrl:      "", // proxies in week 3
+		TimeoutS:      timeout,
+	}, nil
 }

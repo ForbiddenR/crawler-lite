@@ -1,13 +1,15 @@
-// Package runner is the worker-side runtime. Week 1 contract:
+// Package runner is the worker-side runtime.
+//
+// Week 2 contract:
 //
 //   - Open one long-lived bidi stream to the master (with reconnect+backoff).
 //   - Send Hello, receive Welcome.
-//   - On AssignTask: spawn a goroutine that fakes a task lifecycle
-//     (ACCEPTED → RUNNING → SUCCEEDED) and decrements/restores free slots.
-//   - On CancelTask: cancel the goroutine for that task.
+//   - On AssignTask: TaskExecutor downloads source, spawns python, pumps
+//     log/item/screenshot events back through the outbox, and returns a
+//     terminal Result that the worker forwards as a final TaskUpdate.
+//   - On CancelTask: cancel the task's context (the executor's runCtx
+//     observes the parent ctx and SIGTERMs the python subprocess).
 //   - Send a Heartbeat every 10s.
-//
-// Week 2 replaces fakeRun() with TaskExecutor that spawns python -m crawlerkit.runner.
 package runner
 
 import (
@@ -35,10 +37,10 @@ type Config struct {
 }
 
 type Worker struct {
-	cfg Config
-	log *slog.Logger
+	cfg  Config
+	log  *slog.Logger
+	exec *TaskExecutor
 
-	// runtime state
 	freeSlots    atomic.Int32
 	runningCount atomic.Int32
 
@@ -48,10 +50,14 @@ type Worker struct {
 	outbox chan *pb.WorkerMsg
 }
 
-func NewWorker(cfg Config, log *slog.Logger) *Worker {
+// NewWorker constructs a Worker; pass a TaskExecutor or nil. If nil, the
+// worker runs in "fake mode" (week-1 behavior) which is still useful for
+// integration tests of the gRPC layer.
+func NewWorker(cfg Config, exec *TaskExecutor, log *slog.Logger) *Worker {
 	w := &Worker{
 		cfg:     cfg,
 		log:     log,
+		exec:    exec,
 		running: make(map[int64]context.CancelFunc),
 		outbox:  make(chan *pb.WorkerMsg, 64),
 	}
@@ -59,8 +65,7 @@ func NewWorker(cfg Config, log *slog.Logger) *Worker {
 	return w
 }
 
-// Run is the connect-loop: dial master, hold the stream, reconnect on error
-// with exponential backoff. Returns when ctx is cancelled.
+// Run is the connect-loop. Returns when ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) error {
 	backoff := time.Second
 	for {
@@ -104,12 +109,11 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 
-	// Send Hello.
 	if err := stream.Send(&pb.WorkerMsg{
 		Payload: &pb.WorkerMsg_Hello{
 			Hello: &pb.Hello{
 				WorkerId:     w.cfg.WorkerID,
-				Version:      "0.1.0",
+				Version:      "0.2.0",
 				Concurrency:  w.cfg.Concurrency,
 				Capabilities: w.cfg.Capabilities,
 				SharedSecret: w.cfg.SharedSecret,
@@ -119,7 +123,6 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("send hello: %w", err)
 	}
 
-	// Wait for Welcome (the master's first frame).
 	first, err := stream.Recv()
 	if err != nil {
 		return fmt.Errorf("recv welcome: %w", err)
@@ -130,20 +133,15 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 	}
 	w.log.Info("connected", "session", wel.SessionId)
 
-	// Drain outbox to the wire.
 	pumpDone := make(chan error, 1)
-	go func() {
-		pumpDone <- w.pumpOutbox(streamCtx, stream)
-	}()
+	go func() { pumpDone <- w.pumpOutbox(streamCtx, stream) }()
 
-	// Heartbeat loop.
 	hbDone := make(chan struct{})
 	go func() {
 		w.heartbeatLoop(streamCtx)
 		close(hbDone)
 	}()
 
-	// Inbound loop.
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -170,18 +168,20 @@ func (w *Worker) handleMaster(ctx context.Context, msg *pb.MasterMsg) {
 	case *pb.MasterMsg_Cancel:
 		w.cancelTask(p.Cancel.TaskId)
 	case *pb.MasterMsg_Ping:
-		// Could echo back; for now ignore.
+		// no-op
 	default:
 		w.log.Warn("unknown MasterMsg payload")
 	}
 }
 
-// startTask runs the week-1 fake task lifecycle.
+// startTask spawns a goroutine that runs the task through the TaskExecutor
+// (or the fake lifecycle if no executor was provided). When the executor
+// returns, we send the terminal TaskUpdate so the master can transition the
+// task to its final status.
 func (w *Worker) startTask(parent context.Context, a *pb.AssignTask) {
 	w.log.Info("assignment received",
 		"task", a.TaskId, "spider", a.SpiderId, "timeout_s", a.TimeoutS)
 
-	// Reserve a slot.
 	w.freeSlots.Add(-1)
 	w.runningCount.Add(1)
 
@@ -190,9 +190,8 @@ func (w *Worker) startTask(parent context.Context, a *pb.AssignTask) {
 	w.running[a.TaskId] = cancel
 	w.mu.Unlock()
 
-	// Send ACCEPTED then RUNNING.
-	w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_ACCEPTED, "")
-	w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_RUNNING, "")
+	w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_ACCEPTED, "", "")
+	w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_RUNNING, "", "")
 
 	go func() {
 		defer func() {
@@ -203,16 +202,22 @@ func (w *Worker) startTask(parent context.Context, a *pb.AssignTask) {
 			w.freeSlots.Add(1)
 		}()
 
-		// Fake 2s of work.
-		select {
-		case <-taskCtx.Done():
-			w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_CANCELLED, "cancelled")
-			return
-		case <-time.After(2 * time.Second):
+		var res Result
+		if w.exec != nil {
+			res = w.exec.Run(taskCtx, a, w.outbox)
+		} else {
+			// Fallback fake lifecycle: useful for testing the gRPC plumbing
+			// in environments without Python.
+			select {
+			case <-taskCtx.Done():
+				res = Result{State: pb.TaskState_TASK_STATE_CANCELLED}
+			case <-time.After(2 * time.Second):
+				res = Result{State: pb.TaskState_TASK_STATE_SUCCEEDED}
+			}
 		}
 
-		w.log.Info("task done (fake)", "task", a.TaskId)
-		w.sendUpdate(a.TaskId, pb.TaskState_TASK_STATE_SUCCEEDED, "")
+		w.sendUpdate(a.TaskId, res.State, res.Error, res.ErrorClass)
+		w.log.Info("task done", "task", a.TaskId, "state", res.State.String())
 	}()
 }
 
@@ -225,11 +230,11 @@ func (w *Worker) cancelTask(taskID int64) {
 	}
 }
 
-func (w *Worker) sendUpdate(taskID int64, state pb.TaskState, errMsg string) {
+func (w *Worker) sendUpdate(taskID int64, state pb.TaskState, errMsg, errClass string) {
 	w.outbox <- &pb.WorkerMsg{
 		Payload: &pb.WorkerMsg_TaskUpdate{
 			TaskUpdate: &pb.TaskUpdate{
-				TaskId: taskID, State: state, Error: errMsg,
+				TaskId: taskID, State: state, Error: errMsg, ErrorClass: errClass,
 			},
 		},
 	}
