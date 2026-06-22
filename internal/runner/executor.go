@@ -175,9 +175,15 @@ func (e *TaskExecutor) Run(ctx context.Context, a *pb.AssignTask, outbox chan<- 
 	_ = eventW.Close()
 
 	// --- 5. Pump output streams ------------------------------------------
+	//
+	// captcha is shared state: pumpEvents flips Seen + Message when the
+	// spider emits a `captcha` event; classifyOutcome consults the snapshot
+	// after the subprocess exits so a "self.captcha(); raise" sequence
+	// doesn't get overwritten to FAILED.
+	var captcha captchaObs
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); pumpEvents(eventR, a.TaskId, outbox, e.log) }()
+	go func() { defer wg.Done(); pumpEvents(eventR, a.TaskId, outbox, &captcha, e.log) }()
 	go func() { defer wg.Done(); pumpUserLog(stdout, a.TaskId, "INFO", outbox) }()
 	go func() { defer wg.Done(); pumpUserLog(stderr, a.TaskId, "ERROR", outbox) }()
 
@@ -185,18 +191,65 @@ func (e *TaskExecutor) Run(ctx context.Context, a *pb.AssignTask, outbox chan<- 
 	waitErr := cmd.Wait()
 	wg.Wait()
 
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		return Result{State: pb.TaskState_TASK_STATE_CANCELLED}
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		// Make sure no orphaned process group lingers.
+	seenCaptcha, captchaMsg := captcha.snapshot()
+	res := classifyOutcome(ctx.Err(), runCtx.Err(), waitErr, seenCaptcha, captchaMsg)
+	// On timeout we still need to reap any orphaned process group; do it
+	// here so classifyOutcome stays a pure function.
+	if res.State == pb.TaskState_TASK_STATE_TIMEOUT && cmd.Process != nil {
 		_ = killGroup(cmd.Process.Pid)
+	}
+	return res
+}
+
+// captchaObs is the small piece of state shared between pumpEvents (which
+// observes a `captcha` FD3 event) and classifyOutcome (which has to know
+// whether to flip the final Result to CAPTCHA instead of FAILED).
+type captchaObs struct {
+	mu      sync.Mutex
+	seen    bool
+	message string
+}
+
+func (c *captchaObs) set(msg string) {
+	c.mu.Lock()
+	c.seen = true
+	c.message = msg
+	c.mu.Unlock()
+}
+
+func (c *captchaObs) snapshot() (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seen, c.message
+}
+
+// classifyOutcome is a pure function: given the parent/run contexts, the
+// subprocess wait error, and whether we observed a captcha event during
+// the run, decide the terminal Result. No I/O, no clock, no goroutines —
+// 100% unit-testable.
+//
+// The captcha-overrides-exit branch is the whole reason this is its own
+// function: a spider that calls `self.captcha("...")` and then raises
+// must still land as `captcha_blocked`, not `failed`. Slice 16a's retry
+// policy hard-blocks `captcha` — flipping the class here is what keeps
+// the captcha task from being retried as an `exit` failure.
+func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, captchaMsg string) Result {
+	switch {
+	case errors.Is(parentCtxErr, context.Canceled):
+		return Result{State: pb.TaskState_TASK_STATE_CANCELLED}
+	case errors.Is(runCtxErr, context.DeadlineExceeded):
 		return Result{State: pb.TaskState_TASK_STATE_TIMEOUT, Error: "task timed out", ErrorClass: "timeout"}
 	case waitErr != nil:
-		// If the SDK signalled a captcha block via FD 3, the captcha event
-		// already went to the master; we mark the terminal state here.
+		if seenCaptcha {
+			return Result{State: pb.TaskState_TASK_STATE_CAPTCHA, Error: captchaMsg, ErrorClass: "captcha"}
+		}
 		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: waitErr.Error(), ErrorClass: "exit"}
 	default:
+		// Clean exit. If captcha fired, the task is captcha_blocked even
+		// though the script returned successfully.
+		if seenCaptcha {
+			return Result{State: pb.TaskState_TASK_STATE_CAPTCHA, Error: captchaMsg, ErrorClass: "captcha"}
+		}
 		return Result{State: pb.TaskState_TASK_STATE_SUCCEEDED}
 	}
 }
@@ -414,7 +467,7 @@ type rawEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
-func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, log *slog.Logger) {
+func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha *captchaObs, log *slog.Logger) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -460,8 +513,27 @@ func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, log *slo
 				Url: d.URL, Width: int32(d.Width), Height: int32(d.Height), Bytes: int32(d.Bytes),
 			}}}
 		case "captcha":
+			var d struct {
+				Message string `json:"message"`
+			}
+			_ = json.Unmarshal(ev.Data, &d)
+			if captcha != nil {
+				captcha.set(d.Message)
+			}
+			// Surface in the live log tail so operators see *why* the
+			// task is captcha_blocked without digging into the error
+			// field.
+			outbox <- &pb.WorkerMsg{Payload: &pb.WorkerMsg_LogLine{LogLine: &pb.LogLine{
+				TaskId: taskID, TsNs: time.Now().UnixNano(),
+				Level: "INFO", Message: "[captcha] " + d.Message,
+			}}}
+			// Tell the master right away. classifyOutcome will send an
+			// idempotent terminal update later (same state, same class,
+			// same message) so the order between this frame and the
+			// final one doesn't matter.
 			outbox <- &pb.WorkerMsg{Payload: &pb.WorkerMsg_TaskUpdate{TaskUpdate: &pb.TaskUpdate{
-				TaskId: taskID, State: pb.TaskState_TASK_STATE_CAPTCHA, ErrorClass: "captcha",
+				TaskId: taskID, State: pb.TaskState_TASK_STATE_CAPTCHA,
+				Error: d.Message, ErrorClass: "captcha",
 			}}}
 		default:
 			log.Warn("unknown event type", "type", ev.Type)

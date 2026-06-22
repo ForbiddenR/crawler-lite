@@ -107,12 +107,28 @@ function TaskDetailPage() {
               <Row label="Not before">{fmtTime(t.not_before)}</Row>
             )}
           </dl>
-          {t.error && (
+          {t.status === "captcha_blocked" ? (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="font-medium">Captcha blocked</span>
+                <span className="text-[10px] uppercase tracking-wide text-amber-700">
+                  Won't be retried
+                </span>
+              </div>
+              <p className="mt-1 whitespace-pre-wrap">
+                {t.error || "(no message provided)"}
+              </p>
+              <p className="mt-2 text-amber-700/80">
+                The screenshot tab may show the page that tripped the
+                challenge.
+              </p>
+            </div>
+          ) : t.error && (t.status === "failed" || t.status === "timeout") ? (
             <p className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap">
               <span className="font-medium">Error: </span>
               {t.error}
             </p>
-          )}
+          ) : null}
         </CardBody>
       </Card>
 

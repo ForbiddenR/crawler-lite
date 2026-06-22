@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -346,3 +347,161 @@ var _ = func() chan<- *pb.WorkerMsg { return make(chan *pb.WorkerMsg) }
 // Reference the unused-import vacuum so go vet doesn't trip if a future edit
 // removes one of the fmt-style strings above.
 var _ = fmt.Sprintf
+
+// ---------------------------------------------------------------------------
+// Captcha path (Slice 16b)
+// ---------------------------------------------------------------------------
+
+// TestPumpEventsCaptcha feeds a synthetic FD3 stream containing a single
+// captcha event and asserts that pumpEvents:
+//
+//   - flips the shared captchaObs to seen=true with the right message,
+//   - emits an INFO log line so the live tail surfaces the reason,
+//   - emits a TaskUpdate with state=CAPTCHA, class=captcha, and the
+//     message in the error field.
+func TestPumpEventsCaptcha(t *testing.T) {
+	const taskID int64 = 4242
+	r, w := io.Pipe()
+	outbox := make(chan *pb.WorkerMsg, 16)
+	var obs captchaObs
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	done := make(chan struct{})
+	go func() {
+		pumpEvents(r, taskID, outbox, &obs, logger)
+		close(done)
+	}()
+
+	if _, err := w.Write([]byte(`{"type":"captcha","data":{"message":"hit hCaptcha on /checkout"}}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = w.Close()
+	<-done
+
+	seen, msg := obs.snapshot()
+	if !seen || msg != "hit hCaptcha on /checkout" {
+		t.Errorf("captcha observer not set: seen=%v msg=%q", seen, msg)
+	}
+
+	var sawLog, sawUpdate bool
+	close(outbox)
+	for m := range outbox {
+		switch p := m.Payload.(type) {
+		case *pb.WorkerMsg_LogLine:
+			if p.LogLine.Level == "INFO" && strings.Contains(p.LogLine.Message, "[captcha] hit hCaptcha") {
+				sawLog = true
+			}
+		case *pb.WorkerMsg_TaskUpdate:
+			u := p.TaskUpdate
+			if u.TaskId != taskID {
+				t.Errorf("TaskUpdate task_id = %d, want %d", u.TaskId, taskID)
+			}
+			if u.State != pb.TaskState_TASK_STATE_CAPTCHA {
+				t.Errorf("TaskUpdate state = %v, want CAPTCHA", u.State)
+			}
+			if u.ErrorClass != "captcha" {
+				t.Errorf("TaskUpdate error_class = %q, want %q", u.ErrorClass, "captcha")
+			}
+			if u.Error != "hit hCaptcha on /checkout" {
+				t.Errorf("TaskUpdate error = %q, want forwarded message", u.Error)
+			}
+			sawUpdate = true
+		}
+	}
+	if !sawLog {
+		t.Errorf("expected an INFO log line with the captcha message")
+	}
+	if !sawUpdate {
+		t.Errorf("expected a TaskUpdate(CAPTCHA) frame")
+	}
+}
+
+// TestPumpEventsCaptchaMissingMessage covers the case where a spider
+// calls self.captcha() with no message. The observer must still flip;
+// the error field on the wire goes out empty rather than crashing.
+func TestPumpEventsCaptchaMissingMessage(t *testing.T) {
+	r, w := io.Pipe()
+	outbox := make(chan *pb.WorkerMsg, 8)
+	var obs captchaObs
+	done := make(chan struct{})
+	go func() {
+		pumpEvents(r, 1, outbox, &obs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	_, _ = w.Write([]byte(`{"type":"captcha","data":{}}` + "\n"))
+	_ = w.Close()
+	<-done
+	seen, msg := obs.snapshot()
+	if !seen {
+		t.Errorf("observer must flip even with empty message")
+	}
+	if msg != "" {
+		t.Errorf("expected empty message, got %q", msg)
+	}
+}
+
+// TestClassifyOutcome exercises every branch of the pure decision
+// function. The interesting row is "subprocess exit non-zero AND captcha
+// was observed": pre-Slice-16b this returned FAILED + class=exit; now it
+// must return CAPTCHA so the master-side retry path skips it.
+func TestClassifyOutcome(t *testing.T) {
+	timeoutErr := context.DeadlineExceeded
+	cancelErr := context.Canceled
+	someExit := errors.New("exit status 1")
+
+	cases := []struct {
+		name           string
+		parentCtx      error
+		runCtx         error
+		waitErr        error
+		seen           bool
+		msg            string
+		wantState      pb.TaskState
+		wantErrorClass string
+		wantError      string
+	}{
+		{
+			name: "clean success, no captcha",
+			seen: false, wantState: pb.TaskState_TASK_STATE_SUCCEEDED,
+		},
+		{
+			name: "clean exit but captcha observed",
+			seen: true, msg: "hcaptcha",
+			wantState: pb.TaskState_TASK_STATE_CAPTCHA, wantErrorClass: "captcha", wantError: "hcaptcha",
+		},
+		{
+			name:    "non-zero exit, no captcha → FAILED",
+			waitErr: someExit, seen: false,
+			wantState: pb.TaskState_TASK_STATE_FAILED, wantErrorClass: "exit", wantError: someExit.Error(),
+		},
+		{
+			name:    "non-zero exit AFTER captcha → CAPTCHA",
+			waitErr: someExit, seen: true, msg: "hcaptcha",
+			wantState: pb.TaskState_TASK_STATE_CAPTCHA, wantErrorClass: "captcha", wantError: "hcaptcha",
+		},
+		{
+			name: "parent cancellation always wins",
+			parentCtx: cancelErr, waitErr: someExit, seen: true, msg: "x",
+			wantState: pb.TaskState_TASK_STATE_CANCELLED,
+		},
+		{
+			name: "run-timeout always wins (no zombie classification)",
+			runCtx: timeoutErr, waitErr: someExit, seen: true,
+			wantState: pb.TaskState_TASK_STATE_TIMEOUT, wantErrorClass: "timeout", wantError: "task timed out",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyOutcome(tc.parentCtx, tc.runCtx, tc.waitErr, tc.seen, tc.msg)
+			if got.State != tc.wantState {
+				t.Errorf("state: got %v, want %v", got.State, tc.wantState)
+			}
+			if got.ErrorClass != tc.wantErrorClass {
+				t.Errorf("class: got %q, want %q", got.ErrorClass, tc.wantErrorClass)
+			}
+			if got.Error != tc.wantError {
+				t.Errorf("error: got %q, want %q", got.Error, tc.wantError)
+			}
+		})
+	}
+}
