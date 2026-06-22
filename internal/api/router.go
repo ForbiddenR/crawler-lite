@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yourteam/crawler-lite/internal/api/auth"
+	"github.com/yourteam/crawler-lite/internal/api/notifications"
 	"github.com/yourteam/crawler-lite/internal/api/schedules"
 	"github.com/yourteam/crawler-lite/internal/api/spiders"
 	"github.com/yourteam/crawler-lite/internal/api/tasks"
@@ -18,6 +19,7 @@ import (
 	authsvc "github.com/yourteam/crawler-lite/internal/auth"
 	"github.com/yourteam/crawler-lite/internal/cache"
 	"github.com/yourteam/crawler-lite/internal/hub"
+	notifysvc "github.com/yourteam/crawler-lite/internal/notify"
 	"github.com/yourteam/crawler-lite/internal/repository"
 	schedulesvc "github.com/yourteam/crawler-lite/internal/schedule"
 	spidersvc "github.com/yourteam/crawler-lite/internal/spider"
@@ -36,6 +38,7 @@ type Deps struct {
 	// Reload after Create / Update / Delete so the cron picks up changes
 	// immediately.
 	ScheduleRunner schedules.Runner
+	Notify         *notifysvc.Service
 	Hub            *hub.WorkerHub
 
 	// Tasks read endpoints + log WS need direct access to cache/storage/repos
@@ -84,6 +87,11 @@ func NewRouter(d Deps, log *slog.Logger) http.Handler {
 	schedules.RegisterRoutes(authed, schedules.Deps{
 		Service: d.Schedules,
 		Runner:  d.ScheduleRunner,
+		Log:     log,
+	})
+
+	notifications.RegisterRoutes(authed, notifications.Deps{
+		Service: d.Notify,
 		Log:     log,
 	})
 

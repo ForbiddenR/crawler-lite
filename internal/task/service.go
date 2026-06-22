@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/yourteam/crawler-lite/internal/notify"
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 	"github.com/yourteam/crawler-lite/internal/spider"
 )
@@ -93,6 +94,12 @@ type Hub interface {
 	CancelRunning(ctx context.Context, taskID int64) error
 }
 
+// Notifier is called by OnUpdate when a task reaches a terminal state.
+// A nil value (the default) disables notifications.
+type Notifier interface {
+	Notify(ctx context.Context, ev notify.Event)
+}
+
 // Deps groups the dispatch-loop dependencies. A struct keeps the constructor
 // readable as the list grows.
 type Deps struct {
@@ -103,6 +110,9 @@ type Deps struct {
 
 	// Default per-task timeout when the spider config doesn't specify one.
 	DefaultTimeoutSeconds int32
+
+	// Notifier is optional; nil disables notification fan-out.
+	Notifier Notifier
 }
 
 type Service struct {
@@ -183,31 +193,95 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 // state (failed / timeout) and the spider's policy allows another attempt,
 // schedule a child task. The dispatcher's existing wakeup + 5s tick handles
 // firing it once not_before has passed.
+//
+// Notification fan-out happens after the retry decision (we want a rich
+// "attempt 3/5 — giving up" message), but only for terminal states the
+// caller-defined event filter cares about. It runs on a detached
+// goroutine so a slow webhook can't backpressure the gRPC read loop.
 func (s *Service) OnUpdate(ctx context.Context, taskID int64, status Status, errMsg, errClass, workerID string) error {
 	if err := s.deps.Repo.SetStatus(ctx, taskID, status, errMsg, errClass, workerID); err != nil {
 		return err
 	}
-	if status != StatusFailed && status != StatusTimeout {
+	if !isTerminalStatus(status) {
 		return nil
 	}
-	s.maybeScheduleRetry(ctx, taskID, errClass)
+
+	// Retry decision (failed/timeout only). retryAttempted captures the
+	// MaxAttempts and WillRetry bits we want in the notification.
+	var (
+		parent      *Task
+		sp          *spider.Spider
+		maxAttempts int32
+		willRetry   bool
+	)
+	if status == StatusFailed || status == StatusTimeout {
+		parent, sp, maxAttempts, willRetry = s.maybeScheduleRetry(ctx, taskID, errClass)
+	} else {
+		// Captcha / cancelled / succeeded — we still want to fan out, but
+		// we need to load the parent + spider for the message body.
+		var err error
+		parent, err = s.deps.Repo.Get(ctx, taskID)
+		if err != nil {
+			s.deps.Log.Warn("notify: lookup parent", "task", taskID, "err", err)
+			return nil
+		}
+		sp, err = s.deps.Spiders.Get(ctx, parent.SpiderID)
+		if err != nil {
+			s.deps.Log.Warn("notify: lookup spider", "task", taskID, "err", err)
+			return nil
+		}
+		maxAttempts = int32(PolicyFromSpiderConfig(sp.Config).MaxAttempts)
+	}
+
+	if s.deps.Notifier != nil && parent != nil && sp != nil {
+		ev := notify.Event{
+			Kind:         string(status),
+			TaskID:       parent.ID,
+			SpiderID:     parent.SpiderID,
+			SpiderName:   sp.Name,
+			ErrorClass:   errClass,
+			ErrorMessage: errMsg,
+			Attempt:      parent.Attempt,
+			MaxAttempts:  maxAttempts,
+			WillRetry:    willRetry,
+			FinishedAt:   time.Now(),
+		}
+		// Fire-and-forget. Caller's ctx may be cancelled by the time the
+		// goroutine runs (gRPC read loop reuses contexts), so start fresh.
+		go s.deps.Notifier.Notify(context.Background(), ev)
+	}
 	return nil
 }
 
+// isTerminalStatus matches the four terminal task states. Kept in
+// service.go to avoid an import dependency on hub for what's a one-line
+// switch.
+func isTerminalStatus(s Status) bool {
+	switch s {
+	case StatusSucceeded, StatusFailed, StatusCancelled, StatusTimeout, StatusCaptchaBlocked:
+		return true
+	}
+	return false
+}
+
 // maybeScheduleRetry reads the parent task + spider policy, decides, and on
-// "yes" inserts a child task. Errors are logged but never propagated — a
-// failure to schedule a retry must not roll back the parent's terminal
-// status update.
-func (s *Service) maybeScheduleRetry(ctx context.Context, parentID int64, errClass string) {
+// "yes" inserts a child task. Returns the loaded parent + spider, the
+// configured max_attempts, and whether a retry was actually scheduled —
+// so the caller (OnUpdate) can build a notification event without a
+// second round-trip to the DB.
+//
+// Errors are logged but never propagated — a failure to schedule a
+// retry must not roll back the parent's terminal status update.
+func (s *Service) maybeScheduleRetry(ctx context.Context, parentID int64, errClass string) (*Task, *spider.Spider, int32, bool) {
 	parent, err := s.deps.Repo.Get(ctx, parentID)
 	if err != nil {
 		s.deps.Log.Warn("retry: lookup parent", "task", parentID, "err", err)
-		return
+		return nil, nil, 0, false
 	}
 	sp, err := s.deps.Spiders.Get(ctx, parent.SpiderID)
 	if err != nil {
 		s.deps.Log.Warn("retry: lookup spider", "task", parentID, "err", err)
-		return
+		return parent, nil, 0, false
 	}
 	policy := PolicyFromSpiderConfig(sp.Config)
 	attempt := int(parent.Attempt)
@@ -216,7 +290,7 @@ func (s *Service) maybeScheduleRetry(ctx context.Context, parentID int64, errCla
 	}
 	retry, delay := policy.Decide(attempt, errClass)
 	if !retry {
-		return
+		return parent, sp, int32(policy.MaxAttempts), false
 	}
 	notBefore := time.Now().Add(delay)
 	child, err := s.deps.Repo.Create(ctx, CreateInput{
@@ -230,13 +304,14 @@ func (s *Service) maybeScheduleRetry(ctx context.Context, parentID int64, errCla
 	})
 	if err != nil {
 		s.deps.Log.Error("retry: create child", "parent", parentID, "err", err)
-		return
+		return parent, sp, int32(policy.MaxAttempts), false
 	}
 	s.deps.Log.Info("retry: scheduled",
 		"parent", parentID, "child", child.ID,
 		"attempt", child.Attempt, "not_before", notBefore.Format(time.RFC3339),
 		"err_class", errClass)
 	s.notify()
+	return parent, sp, int32(policy.MaxAttempts), true
 }
 
 // notify wakes the dispatch loop. Non-blocking: if a wakeup is already

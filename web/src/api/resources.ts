@@ -178,3 +178,68 @@ export const schedulesApi = {
   remove: (id: number) =>
     api<void>(`/api/schedules/${id}`, { method: "DELETE" }),
 }
+
+// ---------------------------------------------------------------------------
+// Notification channels
+// ---------------------------------------------------------------------------
+
+// Kinds match shoutrrr URL schemes (without the `://`). The picker uses
+// this list to nudge the URL placeholder; the backend's validator is
+// the source of truth.
+export type NotificationKind =
+  | "slack"
+  | "telegram"
+  | "discord"
+  | "smtp"
+  | "generic"
+
+// Events mirror the terminal task statuses the backend will fire on.
+// "succeeded" is intentionally available but off by default — most
+// operators only want to hear about bad news.
+export type NotificationEvent =
+  | "failed"
+  | "timeout"
+  | "captcha_blocked"
+  | "succeeded"
+
+export interface NotificationChannel {
+  id: number
+  name: string
+  kind: NotificationKind | string
+  url: string
+  events: NotificationEvent[]
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface NotificationCreateInput {
+  name: string
+  kind: NotificationKind | string
+  url: string
+  events: NotificationEvent[]
+  enabled?: boolean
+}
+
+export interface NotificationUpdateInput {
+  name: string
+  kind: NotificationKind | string
+  url: string
+  events: NotificationEvent[]
+  enabled?: boolean
+}
+
+export const notificationsApi = {
+  list: () => api<{ items: NotificationChannel[] }>("/api/notifications"),
+  get: (id: number) => api<NotificationChannel>(`/api/notifications/${id}`),
+  create: (input: NotificationCreateInput) =>
+    api<NotificationChannel>("/api/notifications", { method: "POST", json: input }),
+  update: (id: number, input: NotificationUpdateInput) =>
+    api<NotificationChannel>(`/api/notifications/${id}`, { method: "PATCH", json: input }),
+  remove: (id: number) =>
+    api<void>(`/api/notifications/${id}`, { method: "DELETE" }),
+  // Returns { ok: true } on success; throws ApiError(502) with the
+  // sender's error string on failure.
+  test: (id: number) =>
+    api<{ ok: boolean }>(`/api/notifications/${id}/test`, { method: "POST" }),
+}

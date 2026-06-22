@@ -25,6 +25,7 @@ import (
 	"github.com/yourteam/crawler-lite/internal/cache"
 	"github.com/yourteam/crawler-lite/internal/gitsource"
 	"github.com/yourteam/crawler-lite/internal/hub"
+	"github.com/yourteam/crawler-lite/internal/notify"
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 	"github.com/yourteam/crawler-lite/internal/repository"
 	"github.com/yourteam/crawler-lite/internal/schedule"
@@ -53,6 +54,7 @@ type App struct {
 	spider   *spider.Service
 	task     *task.Service
 	schedule *schedule.Service
+	notify   *notify.Service
 	logSink  *hub.LogSinkPubsub // long-lived; flush goroutine started in Run
 
 	// Network surface
@@ -121,11 +123,18 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		workerHub.SetSharedSecret(cfg.WorkerSharedSecret)
 	}
 
+	notifySvc := notify.NewService(notify.Deps{
+		Repo:   repos.Notifications,
+		Sender: notify.ShoutrrrSender{},
+		Log:    log,
+	})
+
 	taskSvc := task.NewService(task.Deps{
-		Repo:    repos.Tasks,
-		Spiders: repos.Spiders,
-		Hub:     workerHub,
-		Log:     log,
+		Repo:     repos.Tasks,
+		Spiders:  repos.Spiders,
+		Hub:      workerHub,
+		Log:      log,
+		Notifier: notifySvc,
 	})
 	workerHub.BindTaskService(taskSvc)
 
@@ -139,6 +148,7 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		Tasks:          taskSvc,
 		Schedules:      scheduleSvc,
 		ScheduleRunner: scheduleRunner,
+		Notify:         notifySvc,
 		Hub:            workerHub,
 		Cache:          cacheCli,
 		Store:          store,
@@ -164,6 +174,7 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		spider:         spiderSvc,
 		task:           taskSvc,
 		schedule:       scheduleSvc,
+		notify:         notifySvc,
 		logSink:        logSink,
 		hub:            workerHub,
 		scheduleRunner: scheduleRunner,

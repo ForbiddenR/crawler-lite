@@ -11,21 +11,23 @@ import "github.com/jackc/pgx/v5/pgxpool"
 
 // Repos is the bag of repositories the master uses.
 type Repos struct {
-	Users     *UserRepo
-	Spiders   *SpiderRepo
-	Tasks     *TaskRepo
-	Items     *ItemRepo
-	Artifacts *ArtifactsRepo
-	Schedules *ScheduleRepo
+	Users         *UserRepo
+	Spiders       *SpiderRepo
+	Tasks         *TaskRepo
+	Items         *ItemRepo
+	Artifacts     *ArtifactsRepo
+	Schedules     *ScheduleRepo
+	Notifications *NotificationRepo
 }
 
 func New(pool *pgxpool.Pool) *Repos {
 	return &Repos{
-		Users:     NewUserRepo(pool),
-		Spiders:   NewSpiderRepo(pool),
-		Tasks:     NewTaskRepo(pool),
-		Items:     NewItemRepo(pool),
-		Artifacts: NewArtifactsRepo(pool),
-		Schedules: NewScheduleRepo(pool),
+		Users:         NewUserRepo(pool),
+		Spiders:       NewSpiderRepo(pool),
+		Tasks:         NewTaskRepo(pool),
+		Items:         NewItemRepo(pool),
+		Artifacts:     NewArtifactsRepo(pool),
+		Schedules:     NewScheduleRepo(pool),
+		Notifications: NewNotificationRepo(pool),
 	}
 }
