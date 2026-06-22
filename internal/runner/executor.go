@@ -22,6 +22,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,20 +47,49 @@ type StorageClient interface {
 }
 
 type TaskExecutor struct {
-	store    StorageClient
-	pyPath   string // /usr/bin/python3 by default
-	workDir  string // parent dir for per-task working dirs
-	log      *slog.Logger
+	store   StorageClient
+	pyPath  string // /usr/bin/python3 by default
+	workDir string // parent dir for per-task working dirs
+	venvDir string // parent dir for per-requirements-hash venvs (persistent across tasks)
+	uvPath  string // resolved path to `uv`, or "" if uv isn't installed
+	log     *slog.Logger
+
+	// venvLocks serializes installs for the same requirements-hash so two
+	// simultaneous tasks for the same spider don't race on the same venv dir.
+	// One sync.Mutex per hash; the outer map is only read/extended under
+	// venvMu.
+	venvMu    sync.Mutex
+	venvLocks map[string]*sync.Mutex
 }
 
-func NewTaskExecutor(store StorageClient, pyPath, workDir string, log *slog.Logger) *TaskExecutor {
+func NewTaskExecutor(store StorageClient, pyPath, workDir, venvDir, uvPath string, log *slog.Logger) *TaskExecutor {
 	if pyPath == "" {
 		pyPath = "python3"
 	}
 	if workDir == "" {
 		workDir = "/tmp/crawler-lite"
 	}
-	return &TaskExecutor{store: store, pyPath: pyPath, workDir: workDir, log: log}
+	if venvDir == "" {
+		venvDir = "/var/lib/crawler-lite/venvs"
+	}
+	if uvPath == "" {
+		if p, err := exec.LookPath("uv"); err == nil {
+			uvPath = p
+		}
+	}
+	if uvPath == "" {
+		log.Warn("uv not installed; per-spider requirements.txt will be skipped",
+			"hint", "install with `make tools-uv` or set UV_PATH")
+	}
+	return &TaskExecutor{
+		store:     store,
+		pyPath:    pyPath,
+		workDir:   workDir,
+		venvDir:   venvDir,
+		uvPath:    uvPath,
+		log:       log,
+		venvLocks: make(map[string]*sync.Mutex),
+	}
 }
 
 // Result is what the worker sends as the final TaskUpdate after Run returns.
@@ -88,6 +119,16 @@ func (e *TaskExecutor) Run(ctx context.Context, a *pb.AssignTask, outbox chan<- 
 		e.log.Warn("presign put", "task", a.TaskId, "err", err)
 	}
 
+	// --- 2b. Resolve interpreter (per-spider venv if requirements.txt) ---
+	pyExe, err := e.resolveInterpreter(ctx, dir, a.TaskId, outbox)
+	if err != nil {
+		stderr := err.Error()
+		if len(stderr) > 2048 {
+			stderr = stderr[:2048]
+		}
+		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: stderr, ErrorClass: "deps"}
+	}
+
 	// --- 3. Pipe for FD 3 -------------------------------------------------
 	eventR, eventW, err := os.Pipe()
 	if err != nil {
@@ -103,7 +144,7 @@ func (e *TaskExecutor) Run(ctx context.Context, a *pb.AssignTask, outbox chan<- 
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, e.pyPath, "-m", "crawlerkit.runner")
+	cmd := exec.CommandContext(runCtx, pyExe, "-m", "crawlerkit.runner")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"PYTHONUNBUFFERED=1",
@@ -227,6 +268,133 @@ func isWithin(parent, child string) bool {
 	p, _ := filepath.Abs(parent)
 	c, _ := filepath.Abs(child)
 	return p == c || (len(c) > len(p) && c[:len(p)] == p && c[len(p)] == filepath.Separator)
+}
+
+// ----------------------------------------------------------------------------
+// resolveInterpreter — per-spider venv cache, keyed by requirements.txt hash.
+//
+// If the extracted source has no `requirements.txt`, we run with the system
+// interpreter (e.pyPath) — current behavior, no surprise.
+//
+// Otherwise we hash the file contents, take the first 16 hex chars, and look
+// up `<venvDir>/<hash>/bin/python`. If it exists, we use it. If it doesn't,
+// and `uv` is installed, we `uv venv` + `uv pip install -r requirements.txt
+// crawlerkit[selenium]` and stream the install output back to the task log as
+// `[deps] …` lines so authors see progress live.
+//
+// If `uv` is NOT installed, we surface one warning into the task log and
+// fall back to the system interpreter — the spider will likely ImportError,
+// but the worker still boots and dep-free spiders keep working.
+// ----------------------------------------------------------------------------
+func (e *TaskExecutor) resolveInterpreter(ctx context.Context, dir string, taskID int64, outbox chan<- *pb.WorkerMsg) (string, error) {
+	reqPath := filepath.Join(dir, "requirements.txt")
+	reqBytes, err := os.ReadFile(reqPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return e.pyPath, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read requirements.txt: %w", err)
+	}
+	if e.uvPath == "" {
+		emitDepsLog(outbox, taskID, "WARN",
+			"requirements.txt present but uv is not installed; spider deps will not be resolved")
+		return e.pyPath, nil
+	}
+
+	sum := sha256.Sum256(reqBytes)
+	hash := hex.EncodeToString(sum[:])[:16]
+	venv := filepath.Join(e.venvDir, hash)
+	pyExe := filepath.Join(venv, "bin", "python")
+
+	// Serialize concurrent installs for the same hash. The outer map is
+	// only mutated under venvMu; the per-hash mutex is locked outside.
+	e.venvMu.Lock()
+	mu, ok := e.venvLocks[hash]
+	if !ok {
+		mu = &sync.Mutex{}
+		e.venvLocks[hash] = mu
+	}
+	e.venvMu.Unlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, err := os.Stat(pyExe); err == nil {
+		return pyExe, nil // cache hit
+	}
+
+	emitDepsLog(outbox, taskID, "INFO", fmt.Sprintf("resolving spider deps into %s", venv))
+
+	if err := os.MkdirAll(e.venvDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir venv parent: %w", err)
+	}
+
+	// `uv venv` is idempotent over a fresh path. We DON'T pre-remove the
+	// dir, because a partially-built venv from a previous crashed install
+	// would already be there — `uv venv` reinitializes it.
+	if err := e.runUVStreamed(ctx, taskID, outbox,
+		"venv", venv, "--python", e.pyPath); err != nil {
+		_ = os.RemoveAll(venv)
+		return "", fmt.Errorf("uv venv: %w", err)
+	}
+
+	installArgs := []string{
+		"pip", "install",
+		"--python", pyExe,
+		"-r", reqPath,
+		"crawlerkit[selenium]",
+	}
+	if err := e.runUVStreamed(ctx, taskID, outbox, installArgs...); err != nil {
+		_ = os.RemoveAll(venv)
+		return "", fmt.Errorf("uv pip install: %w", err)
+	}
+
+	// Sanity check: the install command may have "succeeded" yet not
+	// produced a python binary if e.pyPath itself was broken.
+	if _, err := os.Stat(pyExe); err != nil {
+		_ = os.RemoveAll(venv)
+		return "", fmt.Errorf("venv interpreter missing after install: %s", pyExe)
+	}
+	return pyExe, nil
+}
+
+// runUVStreamed invokes uv with the given args, forwarding stdout+stderr
+// line-by-line into the task log prefixed `[deps] `. Blocks until uv exits.
+func (e *TaskExecutor) runUVStreamed(ctx context.Context, taskID int64, outbox chan<- *pb.WorkerMsg, args ...string) error {
+	cmd := exec.CommandContext(ctx, e.uvPath, args...)
+	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start uv: %w", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); streamUV(stdout, outbox, taskID, "INFO") }()
+	go func() { defer wg.Done(); streamUV(stderr, outbox, taskID, "INFO") }()
+	wg.Wait()
+	return cmd.Wait()
+}
+
+func streamUV(r io.Reader, outbox chan<- *pb.WorkerMsg, taskID int64, level string) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 4096), 1024*1024)
+	for sc.Scan() {
+		emitDepsLog(outbox, taskID, level, sc.Text())
+	}
+}
+
+func emitDepsLog(outbox chan<- *pb.WorkerMsg, taskID int64, level, message string) {
+	outbox <- &pb.WorkerMsg{Payload: &pb.WorkerMsg_LogLine{LogLine: &pb.LogLine{
+		TaskId: taskID, TsNs: time.Now().UnixNano(),
+		Level: level, Message: "[deps] " + message,
+	}}}
 }
 
 func killGroup(pid int) error {

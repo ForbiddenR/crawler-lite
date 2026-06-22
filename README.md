@@ -89,6 +89,28 @@ docker compose exec postgres psql -U crawler -d crawler -c \
 
 Then log in at `http://localhost:5173/login` with `admin@local` / `admin`.
 
+## Spider dependencies
+
+A spider repo may include a `requirements.txt` at its root. On the first task
+for that spider, the worker hashes the file and runs `uv pip install -r
+requirements.txt crawlerkit[selenium]` into a venv under `WORKER_VENV_DIR`
+keyed by the hash. Subsequent tasks reuse the cached venv (one `stat` call)
+and the spider's Python subprocess runs against the venv's interpreter. Install
+output streams into the task log prefixed `[deps] …` so authors see progress
+live, and install failures terminate the task with `error_class=deps`.
+
+Install `uv` once on each worker (`make tools-uv`). If `uv` isn't on PATH at
+worker startup, the worker logs a warning and falls back to the system
+`python3` — dep-free spiders keep working, spiders with a `requirements.txt`
+will see an `ImportError` at runtime.
+
+Worker env knobs:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `WORKER_VENV_DIR` | `/var/lib/crawler-lite/venvs` | parent dir for cached venvs; persists across reboots |
+| `UV_PATH` | _(empty)_ | absolute path to `uv`; empty → auto-detect on `PATH` |
+
 ## Layout
 
 ```

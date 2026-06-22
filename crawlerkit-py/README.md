@@ -81,6 +81,11 @@ From this directory in dev:
 pip install -e .
 ```
 
+> In production, the worker installs your spider's `requirements.txt` into a
+> per-spider cached venv on first run — you don't need to install
+> `crawlerkit` by hand on workers. Pin a specific version in your spider's
+> `requirements.txt` if you need to.
+
 For real Selenium support:
 
 ```sh

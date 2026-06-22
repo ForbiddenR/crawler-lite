@@ -37,10 +37,17 @@ help: ## Show this help
 # Dev tools
 # ---------------------------------------------------------------------------
 .PHONY: tools
-tools: install-protoc ## Install protoc, Go protoc plugins, and goose locally
+tools: install-protoc tools-uv ## Install protoc, Go protoc plugins, goose, and uv locally
 	GOBIN=$(GOBIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	GOBIN=$(GOBIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 	GOBIN=$(GOBIN) go install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
+
+.PHONY: tools-uv
+tools-uv: ## Install uv (Astral) — the worker uses it to install per-spider requirements.txt
+	@command -v uv >/dev/null 2>&1 && { echo "uv already installed: $$(uv --version)"; exit 0; } || true
+	@echo "installing uv via https://astral.sh/uv/install.sh"
+	@curl -LsSf https://astral.sh/uv/install.sh | sh
+	@echo "(if uv is not on PATH yet, add ~/.local/bin to PATH or set UV_PATH in .env)"
 
 .PHONY: install-protoc
 install-protoc: ## Install the latest protoc into /usr/local (Linux only)

@@ -38,7 +38,7 @@ func Build(_ context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 	store := storage.NewMinIOClient(mc, cfg.MinIOBucket)
 
-	exec := runner.NewTaskExecutor(store, cfg.PythonPath, cfg.WorkDir, log)
+	exec := runner.NewTaskExecutor(store, cfg.PythonPath, cfg.WorkDir, cfg.VenvDir, cfg.UVPath, log)
 
 	w := runner.NewWorker(runner.Config{
 		MasterAddr:   cfg.MasterGRPCAddr,
@@ -57,6 +57,7 @@ func (a *App) Run(ctx context.Context) error {
 		"master", a.cfg.MasterGRPCAddr,
 		"concurrency", a.cfg.Concurrency,
 		"python", a.cfg.PythonPath,
+		"venv_dir", a.cfg.VenvDir,
 	)
 	return a.worker.Run(ctx)
 }

@@ -25,6 +25,17 @@ type Config struct {
 	// Parent dir for per-task working dirs. Each task lands in a fresh subdir.
 	WorkDir string `env:"WORKER_WORKDIR" envDefault:"/tmp/crawler-lite"`
 
+	// Parent dir for per-spider venvs, keyed by requirements.txt hash. Unlike
+	// WorkDir this should persist across reboots — its whole purpose is to
+	// avoid reinstalling deps on every task. ~5 MB per venv with uv's
+	// hard-linked wheel cache, so it's cheap.
+	VenvDir string `env:"WORKER_VENV_DIR" envDefault:"/var/lib/crawler-lite/venvs"`
+
+	// Path to `uv` (Astral's pip-compatible installer). Empty → look it up on
+	// PATH at startup. If unset and not found on PATH, per-spider
+	// requirements.txt is skipped (with a warning); dep-free spiders still work.
+	UVPath string `env:"UV_PATH" envDefault:""`
+
 	// Comma-separated, e.g. "python3.12,chromium,selenium"
 	CapabilitiesRaw string `env:"WORKER_CAPABILITIES" envDefault:"python3.12"`
 }
