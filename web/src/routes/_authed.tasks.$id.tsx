@@ -47,6 +47,14 @@ function TaskDetailPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold">Task #{t.id}</h1>
             <StatusBadge status={t.status} />
+            {t.attempt > 1 && (
+              <span
+                className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800"
+                title={`This is attempt ${t.attempt}`}
+              >
+                Attempt {t.attempt}
+              </span>
+            )}
           </div>
           <p className="mt-1 text-sm text-zinc-500">
             <Link
@@ -63,6 +71,18 @@ function TaskDetailPage() {
               </span>
             )}
           </p>
+          {t.parent_task_id ? (
+            <p className="mt-1 text-xs text-zinc-500">
+              ↳ retried from{" "}
+              <Link
+                to="/tasks/$id"
+                params={{ id: String(t.parent_task_id) }}
+                className="font-mono text-zinc-700 hover:underline"
+              >
+                #{t.parent_task_id}
+              </Link>
+            </p>
+          ) : null}
         </div>
         {cancellable && (
           <Button
@@ -83,6 +103,9 @@ function TaskDetailPage() {
             <Row label="Started">{fmtTime(t.started_at) || "—"}</Row>
             <Row label="Finished">{fmtTime(t.finished_at) || "—"}</Row>
             <Row label="Duration">{fmtDuration(t.started_at, t.finished_at) || "—"}</Row>
+            {t.not_before && t.status === "queued" && (
+              <Row label="Not before">{fmtTime(t.not_before)}</Row>
+            )}
           </dl>
           {t.error && (
             <p className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap">

@@ -57,6 +57,7 @@ export type TaskStatus =
 export interface Task {
   id: number
   spider_id: number
+  parent_task_id?: number
   trigger: "manual" | "schedule" | "retry" | "api"
   status: TaskStatus
   spider_version: number
@@ -65,7 +66,10 @@ export interface Task {
   started_at?: string
   finished_at?: string
   error?: string
+  error_class?: string
   stats: Record<string, unknown>
+  attempt: number
+  not_before?: string
 }
 
 export interface TaskItem {

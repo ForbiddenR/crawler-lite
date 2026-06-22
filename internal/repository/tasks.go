@@ -19,7 +19,7 @@ func NewTaskRepo(pool *pgxpool.Pool) *TaskRepo { return &TaskRepo{pool: pool} }
 const taskColumns = `id, spider_id, parent_task_id, trigger, status,
                      spider_version, worker_id, queued_at, started_at,
                      finished_at, exit_code, error, error_class, stats,
-                     created_by, triggered_args`
+                     created_by, triggered_args, attempt, not_before`
 
 func (r *TaskRepo) scanOne(row pgx.Row) (*task.Task, error) {
 	var (
@@ -34,12 +34,13 @@ func (r *TaskRepo) scanOne(row pgx.Row) (*task.Task, error) {
 		statsBytes     []byte
 		createdBy      *int64
 		triggeredBytes []byte
+		notBefore      *time.Time
 	)
 	err := row.Scan(
 		&t.ID, &t.SpiderID, &parentID, &t.Trigger, &t.Status,
 		&t.SpiderVersion, &workerID, &t.QueuedAt, &startedAt,
 		&finishedAt, &exitCode, &errStr, &errClass, &statsBytes,
-		&createdBy, &triggeredBytes,
+		&createdBy, &triggeredBytes, &t.Attempt, &notBefore,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -67,6 +68,7 @@ func (r *TaskRepo) scanOne(row pgx.Row) (*task.Task, error) {
 	if len(triggeredBytes) > 0 {
 		_ = json.Unmarshal(triggeredBytes, &t.TriggeredArgs)
 	}
+	t.NotBefore = notBefore
 	return &t, nil
 }
 
@@ -75,12 +77,17 @@ func (r *TaskRepo) Create(ctx context.Context, in task.CreateInput) (*task.Task,
 	if err != nil {
 		return nil, err
 	}
+	attempt := in.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO tasks (spider_id, trigger, spider_version, triggered_args, created_by)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO tasks (spider_id, parent_task_id, trigger, spider_version,
+		                   triggered_args, created_by, attempt, not_before)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING `+taskColumns,
-		in.SpiderID, in.Trigger, in.SpiderVersion, argsJSON,
-		nullableInt64(in.CreatedBy),
+		in.SpiderID, nullableInt64(in.ParentTaskID), in.Trigger, in.SpiderVersion, argsJSON,
+		nullableInt64(in.CreatedBy), attempt, in.NotBefore,
 	)
 	return r.scanOne(row)
 }
@@ -120,6 +127,7 @@ func (r *TaskRepo) ListQueued(ctx context.Context) ([]*task.Task, error) {
 		SELECT `+taskColumns+`
 		FROM tasks
 		WHERE status = 'queued'
+		  AND (not_before IS NULL OR not_before <= now())
 		ORDER BY queued_at
 	`)
 	if err != nil {

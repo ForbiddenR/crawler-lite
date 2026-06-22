@@ -53,6 +53,8 @@ type Task struct {
 	ErrorClass    string         `json:"error_class,omitempty"`
 	Stats         map[string]any `json:"stats"`
 	TriggeredArgs map[string]any `json:"triggered_args,omitempty"`
+	Attempt       int32          `json:"attempt"`
+	NotBefore     *time.Time     `json:"not_before,omitempty"`
 }
 
 type CreateInput struct {
@@ -61,6 +63,9 @@ type CreateInput struct {
 	SpiderVersion int32
 	TriggeredArgs map[string]any
 	CreatedBy     int64
+	ParentTaskID  int64
+	Attempt       int32
+	NotBefore     *time.Time
 }
 
 // Repository is what the service needs from the persistence layer.
@@ -173,8 +178,65 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 }
 
 // OnUpdate is called by the WorkerHub when it receives a TaskUpdate frame.
+//
+// After persisting the status, if the task landed in a retryable terminal
+// state (failed / timeout) and the spider's policy allows another attempt,
+// schedule a child task. The dispatcher's existing wakeup + 5s tick handles
+// firing it once not_before has passed.
 func (s *Service) OnUpdate(ctx context.Context, taskID int64, status Status, errMsg, errClass, workerID string) error {
-	return s.deps.Repo.SetStatus(ctx, taskID, status, errMsg, errClass, workerID)
+	if err := s.deps.Repo.SetStatus(ctx, taskID, status, errMsg, errClass, workerID); err != nil {
+		return err
+	}
+	if status != StatusFailed && status != StatusTimeout {
+		return nil
+	}
+	s.maybeScheduleRetry(ctx, taskID, errClass)
+	return nil
+}
+
+// maybeScheduleRetry reads the parent task + spider policy, decides, and on
+// "yes" inserts a child task. Errors are logged but never propagated — a
+// failure to schedule a retry must not roll back the parent's terminal
+// status update.
+func (s *Service) maybeScheduleRetry(ctx context.Context, parentID int64, errClass string) {
+	parent, err := s.deps.Repo.Get(ctx, parentID)
+	if err != nil {
+		s.deps.Log.Warn("retry: lookup parent", "task", parentID, "err", err)
+		return
+	}
+	sp, err := s.deps.Spiders.Get(ctx, parent.SpiderID)
+	if err != nil {
+		s.deps.Log.Warn("retry: lookup spider", "task", parentID, "err", err)
+		return
+	}
+	policy := PolicyFromSpiderConfig(sp.Config)
+	attempt := int(parent.Attempt)
+	if attempt < 1 {
+		attempt = 1
+	}
+	retry, delay := policy.Decide(attempt, errClass)
+	if !retry {
+		return
+	}
+	notBefore := time.Now().Add(delay)
+	child, err := s.deps.Repo.Create(ctx, CreateInput{
+		SpiderID:      parent.SpiderID,
+		Trigger:       TriggerRetry,
+		SpiderVersion: parent.SpiderVersion,
+		TriggeredArgs: parent.TriggeredArgs,
+		ParentTaskID:  parent.ID,
+		Attempt:       int32(attempt + 1),
+		NotBefore:     &notBefore,
+	})
+	if err != nil {
+		s.deps.Log.Error("retry: create child", "parent", parentID, "err", err)
+		return
+	}
+	s.deps.Log.Info("retry: scheduled",
+		"parent", parentID, "child", child.ID,
+		"attempt", child.Attempt, "not_before", notBefore.Format(time.RFC3339),
+		"err_class", errClass)
+	s.notify()
 }
 
 // notify wakes the dispatch loop. Non-blocking: if a wakeup is already
@@ -220,6 +282,10 @@ func (s *Service) dispatchOnce(ctx context.Context) {
 				"task", t.ID, "err", err)
 			// Surface the error on the task so the UI shows it.
 			_ = s.deps.Repo.SetStatus(ctx, t.ID, StatusFailed, err.Error(), "build_assign", "")
+			// Treat this the same as a worker-side failure for retry purposes:
+			// the spider author may have opted "build_assign" into retry_on,
+			// in which case a sync between attempts could resolve it.
+			s.maybeScheduleRetry(ctx, t.ID, "build_assign")
 			continue
 		}
 		ok, err := s.deps.Hub.Assign(ctx, assign)
