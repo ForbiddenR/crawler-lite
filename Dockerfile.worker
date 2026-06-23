@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# Worker image — multi-stage. Heavier than the master because it must
+# run Python spiders and (for Selenium spiders) headless Chromium. The
+# Go binary is statically linked; the runtime base is python:3.12-slim
+# so PYTHON_PATH=python3 Just Works and uv installs per-spider venvs.
+#
+# Build:
+#   docker build -f Dockerfile.worker -t crawler-lite-worker \
+#     --build-arg VERSION=$(git describe --tags --always --dirty) .
+
+ARG GO_VERSION=1.26
+ARG VERSION=dev
+
+# --- 1. Go build (same flags as the master, no frontend stage) --------------
+FROM golang:${GO_VERSION}-alpine AS go-build
+ARG VERSION
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X github.com/yourteam/crawler-lite/internal/version.Version=${VERSION}" \
+      -o /out/worker ./cmd/worker
+
+# --- 2. Runtime: Python + uv + Chromium ------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# tini reaps the Python subprocesses the worker spawns (exec.CommandContext),
+# otherwise they can be reparented to PID 1 and linger on cancel/timeout.
+# Chromium + deps are for Selenium spiders; fonts-noto-color-emoji keeps
+# screenshots legible. uv is the per-spider venv installer.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tini \
+        chromium \
+        chromium-driver \
+        fonts-noto-color-emoji \
+        libnss3 \
+        libxss1 \
+        libasound2 \
+        libgbm1 \
+        libxshmfence1 \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv==0.4.30
+
+# Non-root user. WORKER_VENV_DIR persists across tasks (uv hard-links the
+# wheel cache here), so it's a named volume in compose — keep it owned.
+RUN useradd --create-home --shell /bin/bash worker \
+    && mkdir -p /var/lib/crawler-lite/venvs /tmp/crawler-lite \
+    && chown -R worker:worker /var/lib/crawler-lite /tmp/crawler-lite
+
+USER worker
+COPY --from=go-build /out/worker /usr/local/bin/worker
+
+# /tmp is the per-task work dir (WORKER_WORKDIR); venvs live under
+# /var/lib/crawler-lite/venvs (mounted as a volume in compose).
+EXPOSE 9000
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/worker"]

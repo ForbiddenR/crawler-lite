@@ -30,3 +30,7 @@ web/.vite/
 
 # Docker volumes (when using bind mounts)
 .data/
+
+# load test results
+loadtest/results/
+backups/

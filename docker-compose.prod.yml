@@ -1,0 +1,114 @@
+# Production overlay. Apply on top of the dev compose:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# or via `make prod-up`. This overlay:
+#   - adds the master, worker(s), and Caddy;
+#   - removes the host port publishes on the data services (they stay
+#     reachable inside the compose network only);
+#   - names the data volumes so `make backup` can target them.
+#
+# Secrets come from .env (see .env.prod.example). Image tags come from
+# $IMAGE_REGISTRY and $VERSION.
+
+services:
+  # --- Data services: drop host port bindings in prod ----------------------
+  postgres:
+    ports: !reset []
+    restart: always
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    ports: !reset []
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  minio:
+    ports: !reset []
+    restart: always
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    restart: "no"
+
+  # --- Master ---------------------------------------------------------------
+  master:
+    image: ${IMAGE_REGISTRY:-crawler-lite}/crawler-lite-master:${VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: always
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # No host port binding: Caddy fronts :80/:443. The master is reachable
+    # as master:8000 (HTTP) and master:9000 (gRPC) inside the network.
+    expose:
+      - "8000"
+      - "9000"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
+  # --- Worker(s) ------------------------------------------------------------
+  # Scale with: docker compose ... up -d --scale worker=N
+  # WORKER_ID is intentionally NOT set here; the worker falls back to its
+  # container hostname (crawler-lite-worker-1, -2, …), which is stable and
+  # unique per replica.
+  worker:
+    image: ${IMAGE_REGISTRY:-crawler-lite}/crawler-lite-worker:${VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: always
+    env_file: .env
+    depends_on:
+      master:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - worker_venvs:/var/lib/crawler-lite/venvs
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  # --- Caddy: TLS termination + reverse proxy ------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - master
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
+  worker_venvs:
+  caddy_data:
+  caddy_config:

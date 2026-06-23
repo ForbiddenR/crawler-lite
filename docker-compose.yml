@@ -5,15 +5,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: crawler
-      POSTGRES_PASSWORD: crawler
-      POSTGRES_DB: crawler
+      POSTGRES_USER: ${POSTGRES_USER:-crawler}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crawler}
+      POSTGRES_DB: ${POSTGRES_DB:-crawler}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crawler -d crawler"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crawler} -d ${POSTGRES_DB:-crawler}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -36,8 +36,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: crawler
-      MINIO_ROOT_PASSWORD: crawler-secret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crawler}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-crawler-secret}
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # web console
@@ -59,8 +59,8 @@ services:
       - /bin/sh
       - -c
       - |
-        mc alias set local http://minio:9000 crawler crawler-secret &&
-        (mc mb -p local/crawler-artifacts || true) &&
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-crawler} ${MINIO_ROOT_PASSWORD:-crawler-secret} &&
+        (mc mb -p local/${MINIO_BUCKET:-crawler-artifacts} || true) &&
         echo "buckets ready"
 
 volumes:

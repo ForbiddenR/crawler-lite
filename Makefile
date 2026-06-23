@@ -28,6 +28,15 @@ PB_OUT    := internal/pb
 DATABASE_DSN ?= postgres://crawler:crawler@localhost:5432/crawler?sslmode=disable
 MIGRATIONS_DIR := db/migrations
 
+# ---------------------------------------------------------------------------
+# Production deployment
+# ---------------------------------------------------------------------------
+# Image tag defaults to the git describe output (tag, or commit+dirty).
+# Override with `make prod-build VERSION=v0.1.0`.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+IMAGE_REGISTRY ?= crawler-lite
+COMPOSE_PROD := docker compose -f docker-compose.yml -f docker-compose.prod.yml
+
 # ===========================================================================
 .PHONY: help
 help: ## Show this help
@@ -155,3 +164,64 @@ web-dev: ## Run the React dev server
 .PHONY: web-build
 web-build: ## Build the React app
 	cd web && pnpm build
+
+# ---------------------------------------------------------------------------
+# Production deployment (see deploy/RUNBOOK.md)
+# ---------------------------------------------------------------------------
+.PHONY: prod-build
+prod-build: ## Build the master + worker images, tagged $(IMAGE_REGISTRY)/…:$(VERSION)
+	$(COMPOSE_PROD) build --build-arg VERSION=$(VERSION)
+
+.PHONY: prod-push
+prod-push: ## Push the master + worker images to $(IMAGE_REGISTRY)
+	$(COMPOSE_PROD) push
+
+.PHONY: prod-up
+prod-up: ## Start the full production stack (data + master + workers + Caddy)
+	$(COMPOSE_PROD) up -d
+
+.PHONY: prod-down
+prod-down: ## Stop the production stack (keeps volumes)
+	$(COMPOSE_PROD) down
+
+.PHONY: prod-logs
+prod-logs: ## Tail production stack logs
+	$(COMPOSE_PROD) logs -f --tail=200
+
+.PHONY: prod-ps
+prod-ps: ## Show production stack status
+	$(COMPOSE_PROD) ps
+
+.PHONY: prod-migrate
+prod-migrate: ## Apply pending migrations to the prod database (one-shot goose container)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	: "${DATABASE_DSN:?set DATABASE_DSN in .env (host should be 'postgres')}"; \
+	$(COMPOSE_PROD) run --rm --no-deps \
+		-v "$(PWD)/db/migrations:/migrations:ro" \
+		-e GOOSE_DRIVER=postgres \
+		-e GOOSE_DBSTRING="$$DATABASE_DSN" \
+		--entrypoint sh \
+		golang:1.26-alpine -c '\
+			set -e; \
+			echo "installing goose $(GOOSE_VERSION)…"; \
+			go install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION); \
+			/root/go/bin/goose -dir /migrations status; \
+			/root/go/bin/goose -dir /migrations up'
+
+.PHONY: backup
+backup: ## Back up Postgres + MinIO to ./backups/<ts>/ (see deploy/backup.sh)
+	./deploy/backup.sh
+
+.PHONY: restore
+restore: ## Restore from a backup dir: make restore BACKUP=./backups/<ts>
+	./deploy/restore.sh $(BACKUP)
+
+.PHONY: load-test
+load-test: ## Run k6 HTTP perf + queue-burst pipeline throughput tests
+	@command -v k6 >/dev/null 2>&1 || { echo "error: k6 not installed (https://k6.io)"; exit 1; }
+	@mkdir -p loadtest/results
+	@echo "==> k6 HTTP perf (set LOGIN_EMAIL/LOGIN_PASSWORD/SPIDER_ID via env)"
+	k6 run --summary-export loadtest/results/api-results.json loadtest/api.js || true
+	@echo "==> queue burst"
+	./loadtest/queue_burst.sh || true
+	@echo "==> results in loadtest/results/"

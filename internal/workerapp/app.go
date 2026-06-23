@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -23,7 +24,18 @@ type App struct {
 
 func Build(_ context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	if cfg.WorkerID == "" {
-		return nil, fmt.Errorf("WORKER_ID is required")
+		// Fall back to the container hostname so the production compose
+		// can scale workers (docker compose up --scale worker=N) without
+		// setting a distinct WORKER_ID per replica. Docker assigns
+		// "<project>-worker-<n>" hostnames that are stable across
+		// restarts and unique across replicas. An explicit WORKER_ID
+		// always wins.
+		hostname, err := os.Hostname()
+		if err != nil || hostname == "" {
+			return nil, fmt.Errorf("WORKER_ID is required and hostname lookup failed: %w", err)
+		}
+		cfg.WorkerID = hostname
+		log.Info("WORKER_ID unset, falling back to hostname", "worker_id", cfg.WorkerID)
 	}
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 4

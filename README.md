@@ -1,29 +1,39 @@
 # crawler-lite
 
 A focused crawler platform for Python + Selenium spiders. Go master/worker,
-React UI. **Week-2 in progress** — see [`../PLAN.md`](../PLAN.md) for the full
-design.
+React UI. The core loop and operational surface are implemented; see
+[`../PLAN.md`](../PLAN.md) for the original design.
 
 What is here right now:
 
 - ✅ Postgres / Redis / MinIO via Docker Compose
-- ✅ Migrations for users, projects, spiders, tasks, items, artifacts
-- ✅ Go master: HTTP API (login, spiders + git sync, tasks + items/screenshots/log),
-  gRPC server with task dispatcher, log pub/sub fan-out, MinIO log/artifact upload
+- ✅ Migrations for users, projects, spiders, tasks, items, artifacts, schedules,
+  notification channels
+- ✅ Go master: HTTP API (login, spiders + git sync, tasks + items/screenshots/log,
+  schedules, notifications), gRPC server with task dispatcher, log pub/sub fan-out,
+  MinIO log/artifact upload
 - ✅ Go worker: subprocess executor (`python -m crawlerkit.runner`) over FD 3 JSONL,
   stdout/stderr forwarded as INFO/ERROR, source zip download from MinIO
 - ✅ Python `crawlerkit` SDK: `Spider` base class, `log` / `item` / `screenshot` /
   `captcha` events, real Selenium driver (Chromium via Selenium Manager) with
   `MockDriver` fallback so authoring works without a browser installed
 - ✅ Schedules: cron-driven task creation with in-process daemon
+- ✅ Retries + captcha path: configurable retry policy with backoff, captcha
+  classified as a distinct non-retryable terminal state
+- ✅ Notifications: configurable channels (Slack/Telegram/Discord/email/webhook via
+  shoutrrr) fanned out on terminal task events
+- ✅ Deployment: production Dockerfiles (master embeds the SPA via `go:embed`,
+  worker bundles Chromium + uv + tini), prod Compose overlay, Caddy TLS reverse
+  proxy, backup/restore scripts, runbook, k6 + queue-burst load tests
 - ✅ React + Vite + TanStack Router + Tailwind v4: login, dashboard, spiders list +
-  detail, schedules list, tasks list + detail with **live WS log tail**, items, screenshots gallery
+  detail, schedules list, tasks list + detail with **live WS log tail**, items,
+  screenshots gallery, notifications management
 
-What is **not** here yet (later weeks):
+What is **not** here yet:
 
-- ❌ Proxies, retries, notifications
-- ❌ HAR viewer / network tab
-- ❌ Production Dockerfiles, TLS reverse proxy
+- ❌ Proxies (rotating proxy pool, health checks, per-task selection — a
+  `ProxyUrl` field is threaded through dispatch but always empty today)
+- ❌ HAR viewer / network tab in the task detail UI
 
 ---
 
@@ -118,7 +128,7 @@ cmd/{master,worker}        binaries
 internal/app/              ◄── master composition root (read this first)
 internal/workerapp/        ◄── worker composition root
 internal/api/              HTTP handlers
-internal/{auth,spider,task,hub,proxy,...}
+internal/{auth,spider,task,hub,notify,schedule,...}
 internal/repository/       Postgres data access (raw pgx for now)
 internal/storage/          MinIO client
 internal/pb/               generated gRPC stubs (after `make gen`)
@@ -132,7 +142,7 @@ web/                       Vite + React 19 SPA
 See [`../PLAN.md`](../PLAN.md) for the full reasoning behind every library
 choice. Short version:
 
-- Backend: Go 1.26 stdlib `net/http` (chi for middleware), `pgx/v5`, `slog`,
+- Backend: Go 1.26, `gin` (HTTP + middleware), `pgx/v5`, `slog`,
   `grpc`, `golang-jwt/v5`, `redis/go-redis/v9`, `minio-go/v7`. Manual
   constructor DI. No GORM, no Wire, no Dig.
 - Frontend: React 19 + TS 5.6 + Vite 6 + Tailwind v4 + TanStack Router/Query
@@ -143,3 +153,7 @@ choice. Short version:
 ```sh
 make help
 ```
+
+Production deploy, backup/restore, and load testing live behind `make prod-*`,
+`make backup` / `make restore`, and `make load-test`. See
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) for the full operational walkthrough.

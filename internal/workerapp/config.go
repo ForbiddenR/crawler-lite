@@ -8,7 +8,7 @@ import (
 
 type Config struct {
 	MasterGRPCAddr     string `env:"MASTER_GRPC_ADDR" envDefault:"localhost:9000"`
-	WorkerID           string `env:"WORKER_ID,required"`
+	WorkerID           string `env:"WORKER_ID"`
 	Concurrency        int32  `env:"WORKER_CONCURRENCY" envDefault:"4"`
 	WorkerSharedSecret string `env:"WORKER_SHARED_SECRET,required"`
 

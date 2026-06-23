@@ -25,6 +25,8 @@ import (
 	spidersvc "github.com/yourteam/crawler-lite/internal/spider"
 	"github.com/yourteam/crawler-lite/internal/storage"
 	tasksvc "github.com/yourteam/crawler-lite/internal/task"
+	"github.com/yourteam/crawler-lite/internal/version"
+	"github.com/yourteam/crawler-lite/internal/web"
 )
 
 // Deps is what NewRouter needs. Everything is a long-lived service or client
@@ -60,7 +62,13 @@ func NewRouter(d Deps, log *slog.Logger) http.Handler {
 		c.String(http.StatusOK, "ok")
 	})
 
+	// /api/version is public (no auth) so an operator can confirm the
+	// running build after a rollout/rollback without credentials.
 	api := r.Group("/api")
+	api.GET("/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"version": version.Version})
+	})
+
 	authed := api.Group("")
 	authed.Use(authMiddleware(d.Auth, log))
 
@@ -96,6 +104,12 @@ func NewRouter(d Deps, log *slog.Logger) http.Handler {
 	})
 
 	workers.RegisterRoutes(authed, d.Hub, log)
+
+	// Catch-all: any path not matched above (i.e. not /api/*, /healthz)
+	// is served by the embedded SPA build. NoRoute only fires for
+	// unmatched routes, so a 404 inside /api still returns JSON from
+	// the authed group's NoRoute handlers — this never shadows the API.
+	r.NoRoute(gin.WrapH(web.Handler()))
 
 	return r
 }

@@ -1,0 +1,4 @@
+# No third-party deps — the quick spider only uses stdlib + crawlerkit
+# (which the worker installs automatically). Keeping this empty means
+# the venv setup step is a no-op and the load test isn't dominated by
+# `uv pip install` latency.
