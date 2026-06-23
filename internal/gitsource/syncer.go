@@ -107,6 +107,10 @@ func zipDirExcludingGit(root string) ([]byte, error) {
 		// Normalize path separators in the zip — readers expect forward slashes.
 		rel = strings.ReplaceAll(rel, string(os.PathSeparator), "/")
 
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinks are not allowed in spider source: %s", rel)
+		}
+
 		body, err := os.ReadFile(path)
 		if err != nil {
 			return err
