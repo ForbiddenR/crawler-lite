@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react"
 import { type TaskStatus, tasksApi } from "@/api/resources"
 import { Button } from "@/components/ui/button"
 import { Card, CardBody } from "@/components/ui/card"
+import { FoldableMessage } from "@/components/ui/foldable-message"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { useTaskLogStream } from "@/hooks/useTaskLogStream"
 import { fmtDuration, fmtTime } from "@/lib/format"
@@ -66,9 +67,7 @@ function TaskDetailPage() {
             </Link>{" "}
             · v{t.spider_version} · {t.trigger}
             {t.worker_id && (
-              <span className="ml-1 font-mono text-xs">
-                · {t.worker_id.slice(0, 8)}
-              </span>
+              <span className="ml-1 font-mono text-xs">· {t.worker_id.slice(0, 8)}</span>
             )}
           </p>
           {t.parent_task_id ? (
@@ -115,19 +114,15 @@ function TaskDetailPage() {
                   Won't be retried
                 </span>
               </div>
-              <p className="mt-1 whitespace-pre-wrap">
-                {t.error || "(no message provided)"}
-              </p>
+              <FoldableMessage message={t.error || "(no message provided)"} className="mt-1" />
               <p className="mt-2 text-amber-700/80">
-                The screenshot tab may show the page that tripped the
-                challenge.
+                The screenshot tab may show the page that tripped the challenge.
               </p>
             </div>
           ) : t.error && (t.status === "failed" || t.status === "timeout") ? (
-            <p className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap">
-              <span className="font-medium">Error: </span>
-              {t.error}
-            </p>
+            <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+              <FoldableMessage message={t.error} label="Error: " />
+            </div>
           ) : null}
         </CardBody>
       </Card>
@@ -188,9 +183,7 @@ function TabBtn({
       onClick={onClick}
       className={cn(
         "px-6 py-3 text-sm font-medium transition",
-        active
-          ? "border-b-2 border-zinc-900 text-zinc-900"
-          : "text-zinc-500 hover:text-zinc-900",
+        active ? "border-b-2 border-zinc-900 text-zinc-900" : "text-zinc-500 hover:text-zinc-900",
       )}
     >
       {children}
@@ -296,8 +289,7 @@ function ItemsTab({ taskID }: { taskID: number }) {
     refetchInterval: 5_000,
   })
 
-  if (items.isLoading)
-    return <p className="text-sm text-zinc-500">Loading items...</p>
+  if (items.isLoading) return <p className="text-sm text-zinc-500">Loading items...</p>
   const rows = items.data?.items ?? []
   if (rows.length === 0)
     return (
@@ -348,8 +340,7 @@ function ScreenshotsTab({ taskID }: { taskID: number }) {
   })
   const [zoom, setZoom] = useState<string | null>(null)
 
-  if (shots.isLoading)
-    return <p className="text-sm text-zinc-500">Loading screenshots...</p>
+  if (shots.isLoading) return <p className="text-sm text-zinc-500">Loading screenshots...</p>
   const rows = shots.data?.items ?? []
   if (rows.length === 0)
     return (

@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
 import { Link, createFileRoute } from "@tanstack/react-router"
-import { useState } from "react"
 
 import { spidersApi, tasksApi } from "@/api/resources"
 import { Card, CardBody } from "@/components/ui/card"
+import { FoldableMessage } from "@/components/ui/foldable-message"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { fmtDuration, fmtTime } from "@/lib/format"
 
@@ -84,7 +84,10 @@ function TasksPage() {
                         (t.status === "failed" ||
                           t.status === "timeout" ||
                           t.status === "captcha_blocked") ? (
-                          <TaskError message={t.error} />
+                          <FoldableMessage
+                            message={t.error}
+                            className="mt-1 max-w-[420px] text-xs text-red-600"
+                          />
                         ) : null}
                       </td>
                       <td className="px-6 py-3 text-xs text-zinc-600">{t.trigger}</td>
@@ -100,34 +103,6 @@ function TasksPage() {
           )}
         </CardBody>
       </Card>
-    </div>
-  )
-}
-
-// Collapse threshold for the folded error reason. Messages at or below this
-// length render in full with no toggle; longer ones get a preview + a
-// show more/less control so a row stays compact but the full reason is
-// reachable without leaving the list.
-const ERROR_PREVIEW_LEN = 120
-
-function TaskError({ message }: { message: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const long = message.length > ERROR_PREVIEW_LEN
-
-  return (
-    <div className="mt-1 max-w-[420px] text-xs text-red-600">
-      <p className="whitespace-pre-wrap break-words">
-        {long && !expanded ? `${message.slice(0, ERROR_PREVIEW_LEN).trimEnd()}…` : message}
-      </p>
-      {long ? (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="mt-0.5 text-[11px] font-medium text-red-500 underline-offset-2 hover:underline"
-        >
-          {expanded ? "show less" : "show more"}
-        </button>
-      ) : null}
     </div>
   )
 }
