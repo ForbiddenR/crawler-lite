@@ -37,6 +37,11 @@ function SpidersPage() {
     },
   })
 
+  const remove = useMutation({
+    mutationFn: (id: number) => spidersApi.remove(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["spiders"] }),
+  })
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-6">
       <div className="flex items-center justify-between">
@@ -120,6 +125,18 @@ function SpidersPage() {
                           onClick={() => run.mutate(s.id)}
                         >
                           Run
+                        </Button>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={remove.isPending && remove.variables === s.id}
+                          onClick={() => {
+                            if (confirm(`Delete spider "${s.name}"?`)) {
+                              remove.mutate(s.id)
+                            }
+                          }}
+                        >
+                          Delete
                         </Button>
                       </div>
                     </td>

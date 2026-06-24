@@ -43,6 +43,14 @@ function SpiderDetailPage() {
     },
   })
 
+  const remove = useMutation({
+    mutationFn: () => spidersApi.remove(spiderID),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["spiders"] })
+      void navigate({ to: "/spiders" })
+    },
+  })
+
   const recent = (tasks.data?.items ?? [])
     .filter((t) => t.spider_id === spiderID)
     .slice(0, 20)
@@ -76,6 +84,17 @@ function SpiderDetailPage() {
             disabled={s.source_version === 0 || run.isPending}
           >
             {run.isPending ? "Queueing..." : "Run task"}
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => {
+              if (confirm(`Delete spider "${s.name}"?`)) {
+                remove.mutate()
+              }
+            }}
+            disabled={remove.isPending}
+          >
+            {remove.isPending ? "Deleting..." : "Delete"}
           </Button>
         </div>
       </div>
