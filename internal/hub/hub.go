@@ -201,14 +201,29 @@ func (h *WorkerHub) readLoop(ctx context.Context, sess *Session, stream pb.Worke
 			sess.FreeSlots = p.Heartbeat.FreeSlots
 
 		case *pb.WorkerMsg_TaskUpdate:
-			if h.taskSvc != nil {
-				_ = h.taskSvc.OnUpdate(ctx,
-					p.TaskUpdate.TaskId,
-					mapState(p.TaskUpdate.State),
-					p.TaskUpdate.Error,
-					p.TaskUpdate.ErrorClass,
-					sess.WorkerID,
-				)
+			status := mapState(p.TaskUpdate.State)
+			if status == "" {
+				h.log.Warn("task update: unknown state",
+					"task", p.TaskUpdate.TaskId, "state", p.TaskUpdate.State.String())
+				continue
+			}
+			if h.taskSvc == nil {
+				h.log.Error("task update: task service not bound", "task", p.TaskUpdate.TaskId)
+				continue
+			}
+			if err := h.taskSvc.OnUpdate(ctx,
+				p.TaskUpdate.TaskId,
+				status,
+				p.TaskUpdate.Error,
+				p.TaskUpdate.ErrorClass,
+				sess.WorkerID,
+			); err != nil {
+				h.log.Error("task update: persist status",
+					"task", p.TaskUpdate.TaskId,
+					"state", p.TaskUpdate.State.String(),
+					"status", status,
+					"err", err)
+				continue
 			}
 			if isTerminal(p.TaskUpdate.State) {
 				h.releaseTask(sess, p.TaskUpdate.TaskId)
@@ -362,7 +377,7 @@ func (h *WorkerHub) CancelRunning(ctx context.Context, taskID int64) error {
 
 func mapState(s pb.TaskState) task.Status {
 	switch s {
-	case pb.TaskState_TASK_STATE_RUNNING:
+	case pb.TaskState_TASK_STATE_ACCEPTED, pb.TaskState_TASK_STATE_RUNNING:
 		return task.StatusRunning
 	case pb.TaskState_TASK_STATE_SUCCEEDED:
 		return task.StatusSucceeded
@@ -375,7 +390,7 @@ func mapState(s pb.TaskState) task.Status {
 	case pb.TaskState_TASK_STATE_CAPTCHA:
 		return task.StatusCaptchaBlocked
 	default:
-		return task.StatusQueued
+		return ""
 	}
 }
 

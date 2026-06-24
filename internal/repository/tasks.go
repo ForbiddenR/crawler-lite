@@ -77,10 +77,7 @@ func (r *TaskRepo) Create(ctx context.Context, in task.CreateInput) (*task.Task,
 	if err != nil {
 		return nil, err
 	}
-	attempt := in.Attempt
-	if attempt < 1 {
-		attempt = 1
-	}
+	attempt := max(in.Attempt, 1)
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO tasks (spider_id, parent_task_id, trigger, spider_version,
 		                   triggered_args, created_by, attempt, not_before)
@@ -150,12 +147,12 @@ func (r *TaskRepo) ListQueued(ctx context.Context) ([]*task.Task, error) {
 func (r *TaskRepo) SetStatus(ctx context.Context, id int64, status task.Status, errMsg, errClass string, workerID string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE tasks
-		SET status = $2,
+		SET status = $2::task_status,
 		    error = NULLIF($3, ''),
 		    error_class = NULLIF($4, ''),
 		    worker_id = COALESCE(NULLIF($5, ''), worker_id),
-		    started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
-		    finished_at = CASE WHEN $2 IN ('succeeded','failed','cancelled','timeout','captcha_blocked')
+		    started_at = CASE WHEN $2::task_status = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
+		    finished_at = CASE WHEN $2::task_status IN ('succeeded','failed','cancelled','timeout','captcha_blocked')
 		                      THEN now() ELSE finished_at END
 		WHERE id = $1
 	`, id, status, errMsg, errClass, workerID)

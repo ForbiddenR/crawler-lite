@@ -15,6 +15,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthedTasksRouteImport } from './routes/_authed.tasks'
 import { Route as AuthedSpidersRouteImport } from './routes/_authed.spiders'
 import { Route as AuthedSchedulesRouteImport } from './routes/_authed.schedules'
+import { Route as AuthedNotificationsRouteImport } from './routes/_authed.notifications'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed.dashboard'
 import { Route as AuthedTasksIdRouteImport } from './routes/_authed.tasks.$id'
 import { Route as AuthedSpidersIdRouteImport } from './routes/_authed.spiders.$id'
@@ -48,6 +49,11 @@ const AuthedSchedulesRoute = AuthedSchedulesRouteImport.update({
   path: '/schedules',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedNotificationsRoute = AuthedNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const AuthedDashboardRoute = AuthedDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/notifications': typeof AuthedNotificationsRoute
   '/schedules': typeof AuthedSchedulesRoute
   '/spiders': typeof AuthedSpidersRouteWithChildren
   '/tasks': typeof AuthedTasksRouteWithChildren
@@ -78,6 +85,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/notifications': typeof AuthedNotificationsRoute
   '/schedules': typeof AuthedSchedulesRoute
   '/spiders': typeof AuthedSpidersRouteWithChildren
   '/tasks': typeof AuthedTasksRouteWithChildren
@@ -90,6 +98,7 @@ export interface FileRoutesById {
   '/_authed': typeof AuthedRouteWithChildren
   '/login': typeof LoginRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
+  '/_authed/notifications': typeof AuthedNotificationsRoute
   '/_authed/schedules': typeof AuthedSchedulesRoute
   '/_authed/spiders': typeof AuthedSpidersRouteWithChildren
   '/_authed/tasks': typeof AuthedTasksRouteWithChildren
@@ -102,6 +111,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/dashboard'
+    | '/notifications'
     | '/schedules'
     | '/spiders'
     | '/tasks'
@@ -112,6 +122,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/dashboard'
+    | '/notifications'
     | '/schedules'
     | '/spiders'
     | '/tasks'
@@ -123,6 +134,7 @@ export interface FileRouteTypes {
     | '/_authed'
     | '/login'
     | '/_authed/dashboard'
+    | '/_authed/notifications'
     | '/_authed/schedules'
     | '/_authed/spiders'
     | '/_authed/tasks'
@@ -180,6 +192,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedSchedulesRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/notifications': {
+      id: '/_authed/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof AuthedNotificationsRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/dashboard': {
       id: '/_authed/dashboard'
       path: '/dashboard'
@@ -230,6 +249,7 @@ const AuthedTasksRouteWithChildren = AuthedTasksRoute._addFileChildren(
 
 interface AuthedRouteChildren {
   AuthedDashboardRoute: typeof AuthedDashboardRoute
+  AuthedNotificationsRoute: typeof AuthedNotificationsRoute
   AuthedSchedulesRoute: typeof AuthedSchedulesRoute
   AuthedSpidersRoute: typeof AuthedSpidersRouteWithChildren
   AuthedTasksRoute: typeof AuthedTasksRouteWithChildren
@@ -237,6 +257,7 @@ interface AuthedRouteChildren {
 
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedDashboardRoute: AuthedDashboardRoute,
+  AuthedNotificationsRoute: AuthedNotificationsRoute,
   AuthedSchedulesRoute: AuthedSchedulesRoute,
   AuthedSpidersRoute: AuthedSpidersRouteWithChildren,
   AuthedTasksRoute: AuthedTasksRouteWithChildren,

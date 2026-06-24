@@ -34,3 +34,9 @@ web/.vite/
 # load test results
 loadtest/results/
 backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
