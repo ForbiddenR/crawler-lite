@@ -48,6 +48,7 @@ function TasksPage() {
                   <th className="px-6 py-3 font-medium">Trigger</th>
                   <th className="px-6 py-3 font-medium">Queued</th>
                   <th className="px-6 py-3 font-medium">Duration</th>
+                  <th className="px-6 py-3 font-medium">Error</th>
                 </tr>
               </thead>
               <tbody>
@@ -81,11 +82,24 @@ function TasksPage() {
                         <StatusBadge status={t.status} />
                       </td>
                       <td className="px-6 py-3 text-xs text-zinc-600">{t.trigger}</td>
-                      <td className="px-6 py-3 text-xs text-zinc-500">
-                        {fmtTime(t.queued_at)}
-                      </td>
+                      <td className="px-6 py-3 text-xs text-zinc-500">{fmtTime(t.queued_at)}</td>
                       <td className="px-6 py-3 text-xs text-zinc-500">
                         {fmtDuration(t.started_at, t.finished_at)}
+                      </td>
+                      <td className="px-6 py-3 text-xs text-zinc-500">
+                        {t.error &&
+                        (t.status === "failed" ||
+                          t.status === "timeout" ||
+                          t.status === "captcha_blocked") ? (
+                          <span
+                            className="block max-w-[220px] truncate text-red-600"
+                            title={t.error}
+                          >
+                            {t.error}
+                          </span>
+                        ) : (
+                          <span className="text-zinc-300">—</span>
+                        )}
                       </td>
                     </tr>
                   )

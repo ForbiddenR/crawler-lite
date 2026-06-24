@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -179,20 +180,23 @@ func (e *TaskExecutor) Run(ctx context.Context, a *pb.AssignTask, outbox chan<- 
 	// captcha is shared state: pumpEvents flips Seen + Message when the
 	// spider emits a `captcha` event; classifyOutcome consults the snapshot
 	// after the subprocess exits so a "self.captcha(); raise" sequence
-	// doesn't get overwritten to FAILED.
+	// doesn't get overwritten to FAILED. errObs is the error-side analogue:
+	// pumpEvents records the last ERROR log line so a non-zero exit records
+	// the actual Python exception instead of the bare "exit status 1".
 	var captcha captchaObs
+	var errObs errorObs
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); pumpEvents(eventR, a.TaskId, outbox, &captcha, e.log) }()
-	go func() { defer wg.Done(); pumpUserLog(stdout, a.TaskId, "INFO", outbox) }()
-	go func() { defer wg.Done(); pumpUserLog(stderr, a.TaskId, "ERROR", outbox) }()
+	go func() { defer wg.Done(); pumpEvents(eventR, a.TaskId, outbox, &captcha, &errObs, e.log) }()
+	go func() { defer wg.Done(); pumpUserLog(stdout, a.TaskId, "INFO", outbox, e.log) }()
+	go func() { defer wg.Done(); pumpUserLog(stderr, a.TaskId, "ERROR", outbox, e.log) }()
 
 	// --- 6. Wait + classify outcome --------------------------------------
 	waitErr := cmd.Wait()
 	wg.Wait()
 
 	seenCaptcha, captchaMsg := captcha.snapshot()
-	res := classifyOutcome(ctx.Err(), runCtx.Err(), waitErr, seenCaptcha, captchaMsg)
+	res := classifyOutcome(ctx.Err(), runCtx.Err(), waitErr, seenCaptcha, captchaMsg, errObs.snapshot())
 	// On timeout we still need to reap any orphaned process group; do it
 	// here so classifyOutcome stays a pure function.
 	if res.State == pb.TaskState_TASK_STATE_TIMEOUT && cmd.Process != nil {
@@ -223,6 +227,31 @@ func (c *captchaObs) snapshot() (bool, string) {
 	return c.seen, c.message
 }
 
+// errorObs captures the last ERROR-level log line the spider emitted on FD3,
+// so the terminal Result records the actual Python failure reason (e.g.
+// "ValueError: bad thing") instead of the bare process "exit status 1". It
+// is the error-side analogue of captchaObs: pumpEvents populates it while
+// draining FD3, classifyOutcome consults the snapshot after the subprocess
+// exits. Only the headline message is kept here; the traceback is folded
+// into the emitted LogLine (see the "log" case) so it survives in the
+// durable log without bloating the task's error field.
+type errorObs struct {
+	mu      sync.Mutex
+	message string
+}
+
+func (e *errorObs) set(msg string) {
+	e.mu.Lock()
+	e.message = msg
+	e.mu.Unlock()
+}
+
+func (e *errorObs) snapshot() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.message
+}
+
 // classifyOutcome is a pure function: given the parent/run contexts, the
 // subprocess wait error, and whether we observed a captcha event during
 // the run, decide the terminal Result. No I/O, no clock, no goroutines —
@@ -233,7 +262,14 @@ func (c *captchaObs) snapshot() (bool, string) {
 // must still land as `captcha_blocked`, not `failed`. Slice 16a's retry
 // policy hard-blocks `captcha` — flipping the class here is what keeps
 // the captcha task from being retried as an `exit` failure.
-func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, captchaMsg string) Result {
+//
+// lastErr is the last ERROR-level log line captured from FD3 (the spider's
+// uncaught-exception message, e.g. "ValueError: bad thing"). When the
+// subprocess exited non-zero we prefer it over the bare "exit status 1" so
+// the task actually records why the Python failed. ErrorClass stays "exit"
+// — the failure was still an uncaught process exit, and that's the class
+// the retry policy keys on.
+func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, captchaMsg, lastErr string) Result {
 	switch {
 	case errors.Is(parentCtxErr, context.Canceled):
 		return Result{State: pb.TaskState_TASK_STATE_CANCELLED}
@@ -243,7 +279,11 @@ func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, c
 		if seenCaptcha {
 			return Result{State: pb.TaskState_TASK_STATE_CAPTCHA, Error: captchaMsg, ErrorClass: "captcha"}
 		}
-		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: waitErr.Error(), ErrorClass: "exit"}
+		err := lastErr
+		if err == "" {
+			err = waitErr.Error()
+		}
+		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: err, ErrorClass: "exit"}
 	default:
 		// Clean exit. If captcha fired, the task is captcha_blocked even
 		// though the script returned successfully.
@@ -429,17 +469,22 @@ func (e *TaskExecutor) runUVStreamed(ctx context.Context, taskID int64, outbox c
 	}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); streamUV(stdout, outbox, taskID, "INFO") }()
-	go func() { defer wg.Done(); streamUV(stderr, outbox, taskID, "INFO") }()
+	go func() { defer wg.Done(); streamUV(stdout, outbox, taskID, "INFO", e.log) }()
+	go func() { defer wg.Done(); streamUV(stderr, outbox, taskID, "INFO", e.log) }()
 	wg.Wait()
 	return cmd.Wait()
 }
 
-func streamUV(r io.Reader, outbox chan<- *pb.WorkerMsg, taskID int64, level string) {
+func streamUV(r io.Reader, outbox chan<- *pb.WorkerMsg, taskID int64, level string, log *slog.Logger) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 1024*1024)
 	for sc.Scan() {
 		emitDepsLog(outbox, taskID, level, sc.Text())
+	}
+	// EOF is expected; anything else (e.g. an oversize uv output line) would
+	// silently truncate the remaining install output.
+	if err := sc.Err(); err != nil {
+		log.Warn("uv output stream read", "task", taskID, "err", err)
 	}
 }
 
@@ -467,7 +512,7 @@ type rawEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
-func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha *captchaObs, log *slog.Logger) {
+func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha *captchaObs, errObs *errorObs, log *slog.Logger) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -482,13 +527,29 @@ func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha 
 				Level   string `json:"level"`
 				Message string `json:"message"`
 				TsNs    int64  `json:"ts_ns"`
+				Fields  struct {
+					Traceback string `json:"traceback"`
+				} `json:"fields"`
 			}
 			_ = json.Unmarshal(ev.Data, &d)
 			if d.TsNs == 0 {
 				d.TsNs = time.Now().UnixNano()
 			}
+			// The runner emits the uncaught exception as an ERROR log with
+			// the traceback nested under fields.traceback. Capture the
+			// headline message for the terminal Result, and fold the
+			// traceback into the emitted LogLine so it survives in the
+			// durable (MinIO) + live (Redis) log — the proto LogLine has no
+			// fields slot, so the message is the only channel.
+			if strings.EqualFold(d.Level, "ERROR") && errObs != nil {
+				errObs.set(d.Message)
+			}
+			msg := d.Message
+			if d.Fields.Traceback != "" {
+				msg = msg + "\n" + d.Fields.Traceback
+			}
 			outbox <- &pb.WorkerMsg{Payload: &pb.WorkerMsg_LogLine{LogLine: &pb.LogLine{
-				TaskId: taskID, TsNs: d.TsNs, Level: d.Level, Message: d.Message,
+				TaskId: taskID, TsNs: d.TsNs, Level: d.Level, Message: msg,
 			}}}
 		case "item":
 			var d struct {
@@ -539,9 +600,15 @@ func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha 
 			log.Warn("unknown event type", "type", ev.Type)
 		}
 	}
+	// Scan stops on EOF (nil) or on a read/buffer error. A too-long line
+	// (bufio.ErrTooLong) would otherwise silently drop the rest of the FD3
+	// event stream, so surface it.
+	if err := sc.Err(); err != nil {
+		log.Warn("event stream read", "task", taskID, "err", err)
+	}
 }
 
-func pumpUserLog(r io.Reader, taskID int64, level string, outbox chan<- *pb.WorkerMsg) {
+func pumpUserLog(r io.Reader, taskID int64, level string, outbox chan<- *pb.WorkerMsg, log *slog.Logger) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 1024*1024)
 	for sc.Scan() {
@@ -549,5 +616,10 @@ func pumpUserLog(r io.Reader, taskID int64, level string, outbox chan<- *pb.Work
 			TaskId: taskID, TsNs: time.Now().UnixNano(),
 			Level: level, Message: sc.Text(),
 		}}}
+	}
+	// EOF is the expected stop; anything else (e.g. bufio.ErrTooLong from a
+	// single oversize print) would silently truncate the remaining user log.
+	if err := sc.Err(); err != nil {
+		log.Warn("user log stream read", "task", taskID, "stream", level, "err", err)
 	}
 }

@@ -4,13 +4,13 @@
 // test writes a tiny shell stub at a known path and points the executor at
 // it via `uvPath`. The stub:
 //
-//   1. Bumps a counter file so tests can assert how many times uv was
-//      invoked across a sequence of calls.
-//   2. Emulates `uv venv <dir> --python ...`: mkdir -p <dir>/bin && touch
-//      <dir>/bin/python.
-//   3. Emulates `uv pip install ...`: prints a line so we can verify the
-//      "[deps] ..." log forwarding, and (optionally) exits non-zero when
-//      the requirements file contains a magic FAIL marker.
+//  1. Bumps a counter file so tests can assert how many times uv was
+//     invoked across a sequence of calls.
+//  2. Emulates `uv venv <dir> --python ...`: mkdir -p <dir>/bin && touch
+//     <dir>/bin/python.
+//  3. Emulates `uv pip install ...`: prints a line so we can verify the
+//     "[deps] ..." log forwarding, and (optionally) exits non-zero when
+//     the requirements file contains a magic FAIL marker.
 //
 // That's enough to drive every branch of resolveInterpreter without needing
 // Python, pip, or a network.
@@ -368,7 +368,7 @@ func TestPumpEventsCaptcha(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		pumpEvents(r, taskID, outbox, &obs, logger)
+		pumpEvents(r, taskID, outbox, &obs, nil, logger)
 		close(done)
 	}()
 
@@ -425,7 +425,7 @@ func TestPumpEventsCaptchaMissingMessage(t *testing.T) {
 	var obs captchaObs
 	done := make(chan struct{})
 	go func() {
-		pumpEvents(r, 1, outbox, &obs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		pumpEvents(r, 1, outbox, &obs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		close(done)
 	}()
 	_, _ = w.Write([]byte(`{"type":"captcha","data":{}}` + "\n"))
@@ -437,6 +437,57 @@ func TestPumpEventsCaptchaMissingMessage(t *testing.T) {
 	}
 	if msg != "" {
 		t.Errorf("expected empty message, got %q", msg)
+	}
+}
+
+// TestPumpEventsCapturesErrorLog feeds the exact FD3 frame the Python runner
+// emits on an uncaught exception — an ERROR log with the message headline and
+// the traceback nested under fields.traceback — and asserts that pumpEvents:
+//
+//   - records the headline message into the errorObs so classifyOutcome can
+//     use it as the terminal Result.Error instead of "exit status 1",
+//   - folds the traceback into the emitted LogLine message so the full stack
+//     survives in the durable (MinIO) + live (Redis) log.
+func TestPumpEventsCapturesErrorLog(t *testing.T) {
+	const taskID int64 = 7
+	r, w := io.Pipe()
+	outbox := make(chan *pb.WorkerMsg, 8)
+	var obs errorObs
+	done := make(chan struct{})
+	go func() {
+		pumpEvents(r, taskID, outbox, nil, &obs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+
+	frame := `{"type":"log","data":{"level":"ERROR","message":"ValueError: bad thing","ts_ns":1700000000000000000,"fields":{"traceback":"Traceback (most recent call last):\n  File \"spider.py\", line 10, in run\n    raise ValueError(\"bad thing\")\nValueError: bad thing"}}}` + "\n"
+	if _, err := w.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = w.Close()
+	<-done
+
+	if got := obs.snapshot(); got != "ValueError: bad thing" {
+		t.Errorf("errorObs message = %q, want %q", got, "ValueError: bad thing")
+	}
+
+	close(outbox)
+	var sawErrorLog bool
+	for m := range outbox {
+		if ll, ok := m.Payload.(*pb.WorkerMsg_LogLine); ok && ll.LogLine.Level == "ERROR" {
+			sawErrorLog = true
+			if !strings.Contains(ll.LogLine.Message, "ValueError: bad thing") {
+				t.Errorf("log message lost headline: %q", ll.LogLine.Message)
+			}
+			if !strings.Contains(ll.LogLine.Message, "Traceback (most recent call last)") {
+				t.Errorf("log message lost traceback: %q", ll.LogLine.Message)
+			}
+			if ll.LogLine.TsNs != 1700000000000000000 {
+				t.Errorf("ts_ns = %d, want preserved value", ll.LogLine.TsNs)
+			}
+		}
+	}
+	if !sawErrorLog {
+		t.Errorf("expected an ERROR LogLine to be emitted")
 	}
 }
 
@@ -456,6 +507,7 @@ func TestClassifyOutcome(t *testing.T) {
 		waitErr        error
 		seen           bool
 		msg            string
+		lastErr        string
 		wantState      pb.TaskState
 		wantErrorClass string
 		wantError      string
@@ -470,9 +522,14 @@ func TestClassifyOutcome(t *testing.T) {
 			wantState: pb.TaskState_TASK_STATE_CAPTCHA, wantErrorClass: "captcha", wantError: "hcaptcha",
 		},
 		{
-			name:    "non-zero exit, no captcha → FAILED",
+			name:    "non-zero exit, no captcha, no captured log → bare exit status",
 			waitErr: someExit, seen: false,
 			wantState: pb.TaskState_TASK_STATE_FAILED, wantErrorClass: "exit", wantError: someExit.Error(),
+		},
+		{
+			name:    "non-zero exit with captured ERROR log → records Python reason",
+			waitErr: someExit, seen: false, lastErr: "ValueError: bad thing",
+			wantState: pb.TaskState_TASK_STATE_FAILED, wantErrorClass: "exit", wantError: "ValueError: bad thing",
 		},
 		{
 			name:    "non-zero exit AFTER captcha → CAPTCHA",
@@ -480,19 +537,19 @@ func TestClassifyOutcome(t *testing.T) {
 			wantState: pb.TaskState_TASK_STATE_CAPTCHA, wantErrorClass: "captcha", wantError: "hcaptcha",
 		},
 		{
-			name: "parent cancellation always wins",
+			name:      "parent cancellation always wins",
 			parentCtx: cancelErr, waitErr: someExit, seen: true, msg: "x",
 			wantState: pb.TaskState_TASK_STATE_CANCELLED,
 		},
 		{
-			name: "run-timeout always wins (no zombie classification)",
+			name:   "run-timeout always wins (no zombie classification)",
 			runCtx: timeoutErr, waitErr: someExit, seen: true,
 			wantState: pb.TaskState_TASK_STATE_TIMEOUT, wantErrorClass: "timeout", wantError: "task timed out",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyOutcome(tc.parentCtx, tc.runCtx, tc.waitErr, tc.seen, tc.msg)
+			got := classifyOutcome(tc.parentCtx, tc.runCtx, tc.waitErr, tc.seen, tc.msg, tc.lastErr)
 			if got.State != tc.wantState {
 				t.Errorf("state: got %v, want %v", got.State, tc.wantState)
 			}
