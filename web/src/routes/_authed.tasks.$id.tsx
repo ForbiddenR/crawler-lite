@@ -245,7 +245,7 @@ function LogsTab({ taskID }: { taskID: number }) {
               <span className={cn("w-12 shrink-0 font-medium", levelClass(r.level))}>
                 {r.level}
               </span>
-              <span className="whitespace-pre-wrap break-all">{r.message}</span>
+              <FoldableMessage message={r.message} className="min-w-0 flex-1" />
             </div>
           ))
         )}

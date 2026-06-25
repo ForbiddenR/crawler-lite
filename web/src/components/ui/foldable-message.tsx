@@ -28,7 +28,7 @@ export function FoldableMessage({ message, label, className }: FoldableMessagePr
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-0.5 text-[11px] font-medium underline-offset-2 hover:underline"
+          className="mt-0.5 text-[11px] font-medium opacity-70 underline-offset-2 hover:underline"
         >
           {expanded ? "show less" : "show more"}
         </button>
