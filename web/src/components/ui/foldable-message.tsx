@@ -1,11 +1,10 @@
 import { useState } from "react"
 
-// FoldableMessage hides its message until the user opts in. The folded state
-// shows only the reveal control (so a failed task's row stays clean and shows
-// just the status badge); clicking exposes the full message, wrapped. A short
-// single-line message is still shown directly since there's nothing to fold.
-const FOLD_THRESHOLD = 80
-
+// FoldableMessage hides its message entirely until the user opts in. The
+// folded state shows only the reveal control (so a failed task's row stays
+// clean and shows just the status badge); clicking exposes the full message,
+// wrapped. Folding is unconditional — the reason is never shown inline,
+// regardless of length.
 type FoldableMessageProps = {
   message: string
   /** Optional label rendered before the message, e.g. "Error: ". */
@@ -24,20 +23,6 @@ export function FoldableMessage({
   className,
 }: FoldableMessageProps) {
   const [expanded, setExpanded] = useState(false)
-  // Fold anything multi-line (a traceback) or long. A short single-line
-  // message renders in full with no toggle.
-  const foldable = message.includes("\n") || message.length > FOLD_THRESHOLD
-
-  if (!foldable) {
-    return (
-      <div className={className}>
-        <p className="whitespace-pre-wrap break-words">
-          {label ? <span className="font-medium">{label}</span> : null}
-          {message}
-        </p>
-      </div>
-    )
-  }
 
   return (
     <div className={className}>
