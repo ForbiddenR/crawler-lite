@@ -29,6 +29,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 )
@@ -444,10 +445,11 @@ func TestPumpEventsCaptchaMissingMessage(t *testing.T) {
 // emits on an uncaught exception — an ERROR log with the message headline and
 // the traceback nested under fields.traceback — and asserts that pumpEvents:
 //
-//   - records the headline message into the errorObs so classifyOutcome can
-//     use it as the terminal Result.Error instead of "exit status 1",
-//   - folds the traceback into the emitted LogLine message so the full stack
-//     survives in the durable (MinIO) + live (Redis) log.
+//   - records the FULL reason (headline + traceback) into errorObs so the
+//     terminal Result.Error carries a long, foldable, complete reason instead
+//     of just the short headline (which would never trigger the UI fold),
+//   - emits a LogLine carrying the same headline + traceback so it survives
+//     in the durable (MinIO) + live (Redis) log.
 func TestPumpEventsCapturesErrorLog(t *testing.T) {
 	const taskID int64 = 7
 	r, w := io.Pipe()
@@ -466,8 +468,12 @@ func TestPumpEventsCapturesErrorLog(t *testing.T) {
 	_ = w.Close()
 	<-done
 
-	if got := obs.snapshot(); got != "ValueError: bad thing" {
-		t.Errorf("errorObs message = %q, want %q", got, "ValueError: bad thing")
+	got := obs.snapshot()
+	if !strings.HasPrefix(got, "ValueError: bad thing\n") {
+		t.Errorf("errorObs should start with headline+newline, got %q", got)
+	}
+	if !strings.Contains(got, "Traceback (most recent call last)") {
+		t.Errorf("errorObs should contain the traceback, got %q", got)
 	}
 
 	close(outbox)
@@ -488,6 +494,24 @@ func TestPumpEventsCapturesErrorLog(t *testing.T) {
 	}
 	if !sawErrorLog {
 		t.Errorf("expected an ERROR LogLine to be emitted")
+	}
+}
+
+func TestTruncateErr(t *testing.T) {
+	if got := truncateErr("short", 100); got != "short" {
+		t.Errorf("short string should pass through, got %q", got)
+	}
+	got := truncateErr(strings.Repeat("a", 50), 10)
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated string should end with ellipsis, got %q", got)
+	}
+	if len(got) != 13 { // 10 ASCII bytes + 3-byte ellipsis
+		t.Errorf("truncated length = %d, want 13", len(got))
+	}
+	// Must not split a multibyte rune.
+	got = truncateErr("éééééééééé", 4) // each é is 2 bytes
+	if !utf8.ValidString(got[:len(got)-len("…")]) {
+		t.Errorf("truncated string split a rune: %q", got)
 	}
 }
 

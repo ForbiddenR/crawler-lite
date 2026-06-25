@@ -37,6 +37,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	pb "github.com/yourteam/crawler-lite/internal/pb/worker/v1"
 )
@@ -264,11 +265,12 @@ func (e *errorObs) snapshot() string {
 // the captcha task from being retried as an `exit` failure.
 //
 // lastErr is the last ERROR-level log line captured from FD3 (the spider's
-// uncaught-exception message, e.g. "ValueError: bad thing"). When the
-// subprocess exited non-zero we prefer it over the bare "exit status 1" so
-// the task actually records why the Python failed. ErrorClass stays "exit"
-// — the failure was still an uncaught process exit, and that's the class
-// the retry policy keys on.
+// uncaught-exception reason: headline + traceback). When the subprocess
+// exited non-zero we prefer it over the bare "exit status 1" so the task
+// actually records why the Python failed. ErrorClass stays "exit" — the
+// failure was still an uncaught process exit, and that's the class the
+// retry policy keys on. The reason is capped so a runaway traceback can't
+// fill the task's error column; 8 KiB is far past any normal stack trace.
 func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, captchaMsg, lastErr string) Result {
 	switch {
 	case errors.Is(parentCtxErr, context.Canceled):
@@ -283,7 +285,7 @@ func classifyOutcome(parentCtxErr, runCtxErr, waitErr error, seenCaptcha bool, c
 		if err == "" {
 			err = waitErr.Error()
 		}
-		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: err, ErrorClass: "exit"}
+		return Result{State: pb.TaskState_TASK_STATE_FAILED, Error: truncateErr(err, 8192), ErrorClass: "exit"}
 	default:
 		// Clean exit. If captcha fired, the task is captcha_blocked even
 		// though the script returned successfully.
@@ -503,6 +505,20 @@ func killGroup(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGKILL)
 }
 
+// truncateErr bounds an error string to n bytes (UTF-8 safe) so a runaway
+// traceback can't bloat the task's error column. A trailing ellipsis marks
+// the cut so the UI's foldable view can tell the reason was trimmed.
+func truncateErr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	// Back up to a rune boundary so we never split a multibyte char.
+	for len(s) > n && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 // ----------------------------------------------------------------------------
 // FD 3 pump: parses JSONL events and translates each to a WorkerMsg.
 // ----------------------------------------------------------------------------
@@ -536,17 +552,19 @@ func pumpEvents(r io.Reader, taskID int64, outbox chan<- *pb.WorkerMsg, captcha 
 				d.TsNs = time.Now().UnixNano()
 			}
 			// The runner emits the uncaught exception as an ERROR log with
-			// the traceback nested under fields.traceback. Capture the
-			// headline message for the terminal Result, and fold the
-			// traceback into the emitted LogLine so it survives in the
-			// durable (MinIO) + live (Redis) log — the proto LogLine has no
-			// fields slot, so the message is the only channel.
-			if strings.EqualFold(d.Level, "ERROR") && errObs != nil {
-				errObs.set(d.Message)
-			}
+			// the traceback nested under fields.traceback. Build the full
+			// reason (headline + traceback) once: it goes both into errObs —
+			// so the terminal Result records the complete, foldable reason on
+			// the task, not just the short headline — and into the emitted
+			// LogLine so it survives in the durable (MinIO) + live (Redis)
+			// log. The proto LogLine has no fields slot, so the message is
+			// the only channel there.
 			msg := d.Message
 			if d.Fields.Traceback != "" {
 				msg = msg + "\n" + d.Fields.Traceback
+			}
+			if strings.EqualFold(d.Level, "ERROR") && errObs != nil {
+				errObs.set(msg)
 			}
 			outbox <- &pb.WorkerMsg{Payload: &pb.WorkerMsg_LogLine{LogLine: &pb.LogLine{
 				TaskId: taskID, TsNs: d.TsNs, Level: d.Level, Message: msg,
