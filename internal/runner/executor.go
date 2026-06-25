@@ -455,6 +455,12 @@ func (e *TaskExecutor) resolveInterpreter(ctx context.Context, dir string, taskI
 
 // runUVStreamed invokes uv with the given args, forwarding stdout+stderr
 // line-by-line into the task log prefixed `[deps] `. Blocks until uv exits.
+//
+// On a non-zero exit the returned error includes the tail of uv's stderr, so
+// the task's error field records WHY the install failed (e.g. "No matching
+// distribution for foo==99.99") instead of the bare "exit status 1". The
+// full output is still in the task log; this just surfaces the reason on the
+// task itself, parallel to how an uncaught Python exception is captured.
 func (e *TaskExecutor) runUVStreamed(ctx context.Context, taskID int64, outbox chan<- *pb.WorkerMsg, args ...string) error {
 	cmd := exec.CommandContext(ctx, e.uvPath, args...)
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
@@ -469,19 +475,71 @@ func (e *TaskExecutor) runUVStreamed(ctx context.Context, taskID int64, outbox c
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start uv: %w", err)
 	}
+	// tail keeps the last stderr lines so a failed install can report its
+	// reason. uv writes errors to stderr; stdout is progress noise.
+	tail := &lineTail{maxLines: 5}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); streamUV(stdout, outbox, taskID, "INFO", e.log) }()
-	go func() { defer wg.Done(); streamUV(stderr, outbox, taskID, "INFO", e.log) }()
+	go func() { defer wg.Done(); streamUV(stdout, outbox, taskID, "INFO", e.log, nil) }()
+	go func() { defer wg.Done(); streamUV(stderr, outbox, taskID, "INFO", e.log, tail) }()
 	wg.Wait()
-	return cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		if reason := tail.snapshot(); reason != "" {
+			return fmt.Errorf("%s: %s", uvCmdLabel(args), reason)
+		}
+		return fmt.Errorf("%s: %w", uvCmdLabel(args), err)
+	}
+	return nil
 }
 
-func streamUV(r io.Reader, outbox chan<- *pb.WorkerMsg, taskID int64, level string, log *slog.Logger) {
+// uvCmdLabel maps a uv argv to the short label used in deps errors, matching
+// the historical "uv pip install" / "uv venv" prefixes.
+func uvCmdLabel(args []string) string {
+	if len(args) == 0 {
+		return "uv"
+	}
+	if args[0] == "pip" && len(args) > 1 {
+		return "uv pip " + args[1]
+	}
+	return "uv " + args[0]
+}
+
+// lineTail retains the last maxLines non-empty lines written to it. It's the
+// stderr-capture analogue of errorObs: streamUV feeds it while draining uv's
+// stderr, runUVStreamed snapshots it on failure.
+type lineTail struct {
+	mu       sync.Mutex
+	maxLines int
+	lines    []string
+}
+
+func (t *lineTail) add(line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lines = append(t.lines, line)
+	if len(t.lines) > t.maxLines {
+		t.lines = t.lines[len(t.lines)-t.maxLines:]
+	}
+}
+
+func (t *lineTail) snapshot() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, "\n")
+}
+
+func streamUV(r io.Reader, outbox chan<- *pb.WorkerMsg, taskID int64, level string, log *slog.Logger, tail *lineTail) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 1024*1024)
 	for sc.Scan() {
-		emitDepsLog(outbox, taskID, level, sc.Text())
+		line := sc.Text()
+		if tail != nil {
+			tail.add(line)
+		}
+		emitDepsLog(outbox, taskID, level, line)
 	}
 	// EOF is expected; anything else (e.g. an oversize uv output line) would
 	// silently truncate the remaining install output.

@@ -331,6 +331,11 @@ func TestResolveInterpreter_InstallFailure_LeavesNoCacheEntry(t *testing.T) {
 	if !strings.Contains(err.Error(), "uv pip install") {
 		t.Errorf("unexpected error wrapping: %v", err)
 	}
+	// The actual pip failure reason (written to stderr by uv) must be folded
+	// into the error, not just the bare "exit status 1".
+	if !strings.Contains(err.Error(), "refusing FAIL requirement") {
+		t.Errorf("error should capture uv's stderr reason, got: %v", err)
+	}
 	// venvDir should be empty — failed install must clean up its own cache key.
 	entries, _ := os.ReadDir(venvDir)
 	for _, e := range entries {
@@ -348,6 +353,34 @@ var _ = func() chan<- *pb.WorkerMsg { return make(chan *pb.WorkerMsg) }
 // Reference the unused-import vacuum so go vet doesn't trip if a future edit
 // removes one of the fmt-style strings above.
 var _ = fmt.Sprintf
+
+func TestUvCmdLabel(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"pip", "install", "-r", "x"}, "uv pip install"},
+		{[]string{"venv", "/p"}, "uv venv"},
+		{[]string{"pip"}, "uv pip"},
+		{[]string{}, "uv"},
+	}
+	for _, tc := range cases {
+		if got := uvCmdLabel(tc.in); got != tc.want {
+			t.Errorf("uvCmdLabel(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestLineTailKeepsLastNonEmptyLines(t *testing.T) {
+	tail := &lineTail{maxLines: 3}
+	for _, l := range []string{"a", "", "b", "c", "d", "  "} {
+		tail.add(l)
+	}
+	// Empty/whitespace lines are dropped; only the last 3 non-empty kept.
+	if got := tail.snapshot(); got != "b\nc\nd" {
+		t.Errorf("tail = %q, want %q", got, "b\nc\nd")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Captcha path (Slice 16b)
