@@ -86,7 +86,7 @@ function TasksPage() {
                           t.status === "captcha_blocked") ? (
                           <FoldableMessage
                             message={t.error}
-                            className="mt-1 max-w-[420px] text-xs text-red-600"
+                            className="mt-1 inline-block text-xs text-red-600"
                           />
                         ) : null}
                       </td>
