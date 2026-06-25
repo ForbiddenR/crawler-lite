@@ -49,12 +49,13 @@ type StorageClient interface {
 }
 
 type TaskExecutor struct {
-	store   StorageClient
-	pyPath  string // /usr/bin/python3 by default
-	workDir string // parent dir for per-task working dirs
-	venvDir string // parent dir for per-requirements-hash venvs (persistent across tasks)
-	uvPath  string // resolved path to `uv`, or "" if uv isn't installed
-	log     *slog.Logger
+	store          StorageClient
+	pyPath         string // /usr/bin/python3 by default
+	workDir        string // parent dir for per-task working dirs
+	venvDir        string // parent dir for per-requirements-hash venvs (persistent across tasks)
+	uvPath         string // resolved path to `uv`, or "" if uv isn't installed
+	crawlerkitPath string // local path to crawlerkit-py source, installed into each venv
+	log            *slog.Logger
 
 	// venvLocks serializes installs for the same requirements-hash so two
 	// simultaneous tasks for the same spider don't race on the same venv dir.
@@ -64,7 +65,7 @@ type TaskExecutor struct {
 	venvLocks map[string]*sync.Mutex
 }
 
-func NewTaskExecutor(store StorageClient, pyPath, workDir, venvDir, uvPath string, log *slog.Logger) *TaskExecutor {
+func NewTaskExecutor(store StorageClient, pyPath, workDir, venvDir, uvPath, crawlerkitPath string, log *slog.Logger) *TaskExecutor {
 	if pyPath == "" {
 		pyPath = "python3"
 	}
@@ -83,14 +84,22 @@ func NewTaskExecutor(store StorageClient, pyPath, workDir, venvDir, uvPath strin
 		log.Warn("uv not installed; per-spider requirements.txt will be skipped",
 			"hint", "install with `make tools-uv` or set UV_PATH")
 	}
+	if crawlerkitPath != "" {
+		if _, err := os.Stat(crawlerkitPath); err != nil {
+			log.Warn("crawlerkit source path not found; per-spider venvs won't get the SDK",
+				"path", crawlerkitPath, "err", err,
+				"hint", "set WORKER_CRAWLERKIT_PATH to the bundled crawlerkit-py dir")
+		}
+	}
 	return &TaskExecutor{
-		store:     store,
-		pyPath:    pyPath,
-		workDir:   workDir,
-		venvDir:   venvDir,
-		uvPath:    uvPath,
-		log:       log,
-		venvLocks: make(map[string]*sync.Mutex),
+		store:          store,
+		pyPath:         pyPath,
+		workDir:        workDir,
+		venvDir:        venvDir,
+		uvPath:         uvPath,
+		crawlerkitPath: crawlerkitPath,
+		log:            log,
+		venvLocks:      make(map[string]*sync.Mutex),
 	}
 }
 
@@ -430,18 +439,27 @@ func (e *TaskExecutor) resolveInterpreter(ctx context.Context, dir string, taskI
 	if err := e.runUVStreamed(ctx, taskID, outbox,
 		"venv", venv, "--python", e.pyPath); err != nil {
 		_ = os.RemoveAll(venv)
-		return "", fmt.Errorf("uv venv: %w", err)
+		return "", err
 	}
 
+	// crawlerkit is a local project (crawlerkit-py/), not published to PyPI,
+	// so install it from the bundled source path rather than by package name.
+	// uv treats a directory argument as a local project and builds/installs
+	// it; the [selenium] extra pulls in the Selenium driver. If no path is
+	// configured the venv just won't get the SDK (spiders then ImportError —
+	// surfaced as a deps error with a clear reason thanks to stderr capture).
+	crawlerkitSpec := e.crawlerkitPath + "[selenium]"
 	installArgs := []string{
 		"pip", "install",
 		"--python", pyExe,
 		"-r", reqPath,
-		"crawlerkit[selenium]",
+	}
+	if e.crawlerkitPath != "" {
+		installArgs = append(installArgs, crawlerkitSpec)
 	}
 	if err := e.runUVStreamed(ctx, taskID, outbox, installArgs...); err != nil {
 		_ = os.RemoveAll(venv)
-		return "", fmt.Errorf("uv pip install: %w", err)
+		return "", err
 	}
 
 	// Sanity check: the install command may have "succeeded" yet not

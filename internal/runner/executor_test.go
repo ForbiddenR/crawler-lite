@@ -61,6 +61,11 @@ pip)
         echo "fake-uv: unsupported pip subcommand: $sub" >&2
         exit 2
     fi
+    # Optionally record the full install argv so tests can assert which
+    # packages were requested (e.g. the local crawlerkit path).
+    if [ -n "$ARGS_FILE" ]; then
+        printf '%s\\n' "$@" >> "$ARGS_FILE"
+    fi
     # Walk args looking for -r REQS so we can fail on the magic marker.
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -238,6 +243,43 @@ func TestResolveInterpreter_CacheHit(t *testing.T) {
 		if strings.HasPrefix(m, "[deps]") {
 			t.Errorf("cache hit should be silent, but saw deps log %q", m)
 		}
+	}
+}
+
+// TestResolveInterpreter_InstallsCrawlerkitFromLocalPath asserts that the SDK
+// is requested as the local source path (with the [selenium] extra), NOT as a
+// bare PyPI package name — crawlerkit is a local project, so uv must install
+// it from disk or it fails with "no versions of crawlerkit".
+func TestResolveInterpreter_InstallsCrawlerkitFromLocalPath(t *testing.T) {
+	uvPath, _ := writeFakeUV(t, t.TempDir())
+	e, _ := newTestExecutor(t, uvPath)
+	// Point at a real local dir so the executor treats the SDK as available.
+	ck := t.TempDir()
+	e.crawlerkitPath = ck
+
+	srcDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(srcDir, "requirements.txt"), []byte("requests==2.31.0\n"), 0o644)
+
+	argsFile := filepath.Join(t.TempDir(), "install-args")
+	outbox := make(chan *pb.WorkerMsg, 64)
+	_ = drainLogs(outbox, 200*time.Millisecond)
+
+	t.Setenv("ARGS_FILE", argsFile)
+	if _, err := e.resolveInterpreter(context.Background(), srcDir, 1, outbox); err != nil {
+		t.Fatalf("resolveInterpreter: %v", err)
+	}
+
+	b, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("install args not recorded: %v", err)
+	}
+	want := ck + "[selenium]"
+	if !strings.Contains(string(b), want) {
+		t.Errorf("install args should request local crawlerkit path %q\n got: %s", want, string(b))
+	}
+	// Must NOT request the bare PyPI name.
+	if strings.Contains(string(b), " crawlerkit[selenium]") {
+		t.Errorf("install args must not request bare crawlerkit[selenium] from PyPI\n got: %s", string(b))
 	}
 }
 

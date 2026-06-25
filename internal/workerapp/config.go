@@ -36,6 +36,12 @@ type Config struct {
 	// requirements.txt is skipped (with a warning); dep-free spiders still work.
 	UVPath string `env:"UV_PATH" envDefault:""`
 
+	// Local path to the crawlerkit-py source tree, bundled into the worker
+	// image. Installed into each per-spider venv (crawlerkit is a local
+	// project, NOT published to PyPI, so it must be installed from disk).
+	// Empty → venvs don't get the SDK; spiders then ImportError.
+	CrawlerkitPath string `env:"WORKER_CRAWLERKIT_PATH" envDefault:"/opt/crawlerkit-py"`
+
 	// Comma-separated, e.g. "python3.12,chromium,selenium"
 	CapabilitiesRaw string `env:"WORKER_CAPABILITIES" envDefault:"python3.12"`
 }

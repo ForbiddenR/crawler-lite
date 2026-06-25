@@ -52,11 +52,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Non-root user. WORKER_VENV_DIR persists across tasks (uv hard-links the
 # wheel cache here), so it's a named volume in compose — keep it owned.
 RUN useradd --create-home --shell /bin/bash worker \
-    && mkdir -p /var/lib/crawler-lite/venvs /tmp/crawler-lite \
-    && chown -R worker:worker /var/lib/crawler-lite /tmp/crawler-lite
+    && mkdir -p /var/lib/crawler-lite/venvs /tmp/crawler-lite /opt \
+    && chown -R worker:worker /var/lib/crawler-lite /tmp/crawler-lite /opt
 
 USER worker
 COPY --from=go-build /out/worker /usr/local/bin/worker
+
+# Bundle the crawlerkit SDK source. It's a local project (NOT on PyPI), so
+# each per-spider venv installs it from this path via
+# `uv pip install /opt/crawlerkit-py[selenium]`. Owned by worker because uv
+# writes build artifacts (egg-info) into the source tree while installing.
+COPY --chown=worker:worker crawlerkit-py /opt/crawlerkit-py
 
 # /tmp is the per-task work dir (WORKER_WORKDIR); venvs live under
 # /var/lib/crawler-lite/venvs (mounted as a volume in compose).

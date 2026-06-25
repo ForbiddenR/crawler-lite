@@ -50,7 +50,7 @@ func Build(_ context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 	store := storage.NewMinIOClient(mc, cfg.MinIOBucket)
 
-	exec := runner.NewTaskExecutor(store, cfg.PythonPath, cfg.WorkDir, cfg.VenvDir, cfg.UVPath, log)
+	exec := runner.NewTaskExecutor(store, cfg.PythonPath, cfg.WorkDir, cfg.VenvDir, cfg.UVPath, cfg.CrawlerkitPath, log)
 
 	w := runner.NewWorker(runner.Config{
 		MasterAddr:   cfg.MasterGRPCAddr,
