@@ -47,7 +47,16 @@ function TaskDetailPage() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold">Task #{t.id}</h1>
-            <StatusBadge status={t.status} />
+            {t.error &&
+            (t.status === "failed" || t.status === "timeout" || t.status === "captcha_blocked") ? (
+              <FoldableMessage
+                message={t.error}
+                label="Error: "
+                trigger={<StatusBadge status={t.status} />}
+              />
+            ) : (
+              <StatusBadge status={t.status} />
+            )}
             {t.attempt > 1 && (
               <span
                 className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800"
@@ -111,18 +120,17 @@ function TaskDetailPage() {
               <div className="flex items-baseline justify-between gap-3">
                 <span className="font-medium">Captcha blocked</span>
                 <span className="text-[10px] uppercase tracking-wide text-amber-700">
-                  Won't be retried
+                  Won't be retried · click the status badge for the reason
                 </span>
               </div>
-              <FoldableMessage message={t.error || "(no message provided)"} className="mt-1" />
               <p className="mt-2 text-amber-700/80">
                 The screenshot tab may show the page that tripped the challenge.
               </p>
             </div>
           ) : t.error && (t.status === "failed" || t.status === "timeout") ? (
-            <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-              <FoldableMessage message={t.error} label="Error: " />
-            </div>
+            <p className="mt-4 text-xs text-zinc-500">
+              Click the status badge for the error reason.
+            </p>
           ) : null}
         </CardBody>
       </Card>

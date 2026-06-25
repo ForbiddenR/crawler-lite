@@ -79,16 +79,18 @@ function TasksPage() {
                         )}
                       </td>
                       <td className="px-6 py-3 align-top">
-                        <StatusBadge status={t.status} />
                         {t.error &&
                         (t.status === "failed" ||
                           t.status === "timeout" ||
                           t.status === "captcha_blocked") ? (
                           <FoldableMessage
                             message={t.error}
-                            className="mt-1 inline-block text-xs text-red-600"
+                            label="Error: "
+                            trigger={<StatusBadge status={t.status} />}
                           />
-                        ) : null}
+                        ) : (
+                          <StatusBadge status={t.status} />
+                        )}
                       </td>
                       <td className="px-6 py-3 text-xs text-zinc-600">{t.trigger}</td>
                       <td className="px-6 py-3 text-xs text-zinc-500">{fmtTime(t.queued_at)}</td>
