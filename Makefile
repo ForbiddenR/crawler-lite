@@ -177,7 +177,7 @@ prod-push: ## Push the master + worker images to $(IMAGE_REGISTRY)
 	$(COMPOSE_PROD) push
 
 .PHONY: prod-up
-prod-up: ## Start the full production stack (data + master + workers + Caddy)
+prod-up: ## Start the production app stack (data + master + workers)
 	$(COMPOSE_PROD) up -d
 
 .PHONY: prod-down

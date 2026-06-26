@@ -42,3 +42,9 @@ __pycache__/
 .pytest_cache/
 
 test/*
+
+# Python packaging/build outputs
+crawlerkit-py/build/
+crawlerkit-py/dist/
+crawlerkit-py/*.egg-info/
+crawlerkit-py/src/*.egg-info/

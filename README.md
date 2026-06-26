@@ -23,8 +23,9 @@ What is here right now:
 - ✅ Notifications: configurable channels (Slack/Telegram/Discord/email/webhook via
   shoutrrr) fanned out on terminal task events
 - ✅ Deployment: production Dockerfiles (master embeds the SPA via `go:embed`,
-  worker bundles Chromium + uv + tini), prod Compose overlay, Caddy TLS reverse
-  proxy, backup/restore scripts, runbook, k6 + queue-burst load tests
+  worker bundles Chromium + uv + tini), prod Compose overlay for app services,
+  external reverse proxy/TLS, backup/restore scripts, runbook, k6 + queue-burst
+  load tests
 - ✅ React + Vite + TanStack Router + Tailwind v4: login, dashboard, spiders list +
   detail, schedules list, tasks list + detail with **live WS log tail**, items,
   screenshots gallery, notifications management

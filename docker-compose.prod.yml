@@ -3,9 +3,10 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
 # or via `make prod-up`. This overlay:
-#   - adds the master, worker(s), and Caddy;
+#   - adds the master and worker(s);
 #   - removes the host port publishes on the data services (they stay
 #     reachable inside the compose network only);
+#   - publishes the master's HTTP port on localhost for a host-managed proxy;
 #   - names the data volumes so `make backup` can target them.
 #
 # Secrets come from .env (see .env.prod.example). Image tags come from
@@ -53,10 +54,11 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-    # No host port binding: Caddy fronts :80/:443. The master is reachable
-    # as master:8000 (HTTP) and master:9000 (gRPC) inside the network.
+    # HTTP is bound to localhost for the host/server reverse proxy. gRPC stays
+    # internal to the compose network for workers at master:9000.
+    ports:
+      - "127.0.0.1:8000:8000"
     expose:
-      - "8000"
       - "9000"
     deploy:
       resources:
@@ -91,24 +93,8 @@ services:
           cpus: "2.0"
           memory: 2g
 
-  # --- Caddy: TLS termination + reverse proxy ------------------------------
-  caddy:
-    image: caddy:2-alpine
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - master
-
 volumes:
   pg_data:
   redis_data:
   minio_data:
   worker_venvs:
-  caddy_data:
-  caddy_config:

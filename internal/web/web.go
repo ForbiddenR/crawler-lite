@@ -3,8 +3,8 @@
 // In production the master binary embeds web/dist (produced by
 // `pnpm build`) via //go:embed and serves it directly, so the whole
 // control plane is one image with no separate static-file mount.
-// Caddy in front only terminates TLS and reverse-proxies to the
-// master.
+// Any external reverse proxy in front only terminates TLS and proxies to
+// the master.
 //
 // In dev the embedded dist/ contains only a .gitkeep placeholder (no
 // index.html); Handler() detects that and returns a 404 handler, so

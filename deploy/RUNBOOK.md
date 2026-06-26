@@ -2,58 +2,105 @@
 
 This runbook covers deploying, operating, backing up, and rolling back
 crawler-lite in production. The deployment model is **Docker Compose on a
-single VM**: Postgres, Redis, MinIO, one master, N workers, and Caddy for
-TLS. For multi-node/HA, see the non-goals in the slice plan — that's a
-later piece of work.
+single VM** for the app stack: Postgres, Redis, MinIO, one master, and N
+workers. TLS and reverse proxying are handled by the host/server
+infrastructure outside this repository, using Nginx, Caddy, or your platform's
+standard proxy. For multi-node/HA, see the non-goals in the slice plan — that's
+a later piece of work.
 
 ## Architecture at a glance
 
 ```
-            ┌─────────┐
- :80/:443 → │  Caddy  │  TLS termination, reverse proxy
-            └────┬────┘
-                 │ :8000 (HTTP: REST + WebSocket + SPA)
+       Host/server infrastructure (outside this repo)
+
+ :80/:443 → Nginx/Caddy/etc.  TLS termination, reverse proxy
+                 │
+                 │ http://127.0.0.1:8000
             ┌────▼────┐
             │ Master  │  Go binary; SPA embedded via go:embed
             └─┬─────┬─┘
-   :9000 gRPC  │     │ HTTP
-   (internal)  │     │
+   :9000 gRPC  │     │ HTTP :8000
+   (internal)  │     │ bound to 127.0.0.1 on the host
         ┌──────▼┐  ┌─▼────┐  ┌────────┐  ┌────────┐
         │Worker │  │Postgres│  │ Redis  │  │ MinIO  │
         │×N     │  └────────┘  └────────┘  └────────┘
         └───────┘
 ```
 
-The master serves everything (API + SPA). Caddy only terminates TLS.
-gRPC between master and workers stays inside the compose network.
+The master serves everything (API + WebSocket log stream + SPA). The production
+Compose overlay publishes the master's HTTP port to `127.0.0.1:8000` so a
+host-managed reverse proxy can reach it. gRPC between master and workers stays
+inside the Compose network at `master:9000`.
 
 ## 1. First-time deploy
 
-```sh
-git clone <repo> crawler-lite && cd crawler-lite
-cp .env.prod.example .env
-$EDITOR .env          # rotate EVERY CHANGE_ME secret
-make prod-build VERSION=$(git describe --tags --always --dirty)
-make prod-up
-make prod-migrate     # apply DB migrations (one-shot goose container)
-```
+1. Configure the host/server reverse proxy outside this repository. Its upstream
+   should be:
 
-Then verify:
+   ```text
+   http://127.0.0.1:8000
+   ```
+
+   For WebSocket live task logs, make sure the proxy supports WebSocket upgrades.
+   Caddy does this automatically; Nginx needs the usual `Upgrade` and
+   `Connection` headers.
+
+2. Deploy crawler-lite:
+
+   ```sh
+   git clone <repo> crawler-lite && cd crawler-lite
+   cp .env.prod.example .env
+   $EDITOR .env          # rotate EVERY CHANGE_ME secret
+   make prod-build VERSION=$(git describe --tags --always --dirty)
+   make prod-up
+   make prod-migrate     # apply DB migrations (one-shot goose container)
+   ```
+
+Then verify the direct app port from the host:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.prod.yml ps   # all healthy
-curl -s http://localhost/healthz        # → ok   (use https://$DOMAIN in prod)
-curl -s http://localhost/api/version    # → {"version":"…"}
+curl -s http://127.0.0.1:8000/healthz        # → ok
+curl -s http://127.0.0.1:8000/api/version    # → {"version":"…"}
 ```
 
-For a **local/plain-HTTP** stack (no domain, no TLS), set `DOMAIN=:80`
-in `.env`. Caddy then serves plain HTTP on :80 only.
+Then verify through your external proxy, for example:
+
+```sh
+curl -s https://crawler.example.com/healthz
+curl -s https://crawler.example.com/api/version
+```
 
 > **Module path note:** `go.mod` uses the placeholder
 > `github.com/yourteam/crawler-lite`. The `IMAGE_REGISTRY` default
 > (`crawler-lite`) builds locally-tagged images — fine for a single VM.
 > Publishing to a real registry and renaming the module is a separate
 > slice.
+
+### External proxy examples
+
+Minimal host-level Caddy example:
+
+```caddy
+crawler.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+Minimal host-level Nginx location example:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
 
 ## 2. Seeding the admin user
 
@@ -71,8 +118,8 @@ docker compose ... exec postgres psql -U crawler -d crawler -c \
      VALUES ('admin@example.com', '\$2a\$10\$...', 'admin', now(), now());"
 ```
 
-After that, log in via the UI at `https://$DOMAIN` and rotate the
-password through the profile flow if one exists.
+After that, log in via your external proxy URL and rotate the password through
+the profile flow if one exists.
 
 ## 3. Routine operations
 
@@ -120,7 +167,7 @@ Rolling back to a previous image tag:
 
 ```sh
 VERSION=v0.1.0 make prod-up
-curl -s http://localhost/api/version   # confirm
+curl -s http://127.0.0.1:8000/api/version   # confirm direct app port
 ```
 
 Compose pulls the specified tag and recreates the containers atomically
@@ -156,9 +203,15 @@ the numbers are comparable across runs.
 - **Workers don't connect:** check `WORKER_SHARED_SECRET` matches master
   and worker, and `MASTER_GRPC_ADDR=master:9000`. `docker compose logs
   worker` shows the gRPC handshake.
-- **Caddy can't get a cert:** `DOMAIN` must be a real resolvable hostname
-  pointing at the VM, and :80/:443 must be reachable from the internet
-  (Let's Encrypt HTTP-01 challenge). For local testing use `DOMAIN=:80`.
+- **External proxy returns 502/503:** confirm the crawler-lite stack is up
+  and the host proxy can reach `http://127.0.0.1:8000/healthz` from the
+  same server.
+- **Live task logs don't stream through the proxy:** confirm WebSocket
+  upgrade headers are forwarded. Caddy handles this automatically; Nginx
+  needs `proxy_http_version 1.1`, `Upgrade`, and `Connection` headers.
+- **TLS/certificates fail:** this is owned by the host/server proxy, not
+  the crawler-lite Compose stack. Check DNS, firewall, and your proxy's
+  certificate automation.
 - **`/` returns 404:** the master's embedded SPA wasn't built. Rebuild
   the image with `make prod-build` — the Dockerfile's frontend-build
   stage must succeed for `internal/web/dist/index.html` to exist.
