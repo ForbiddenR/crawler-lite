@@ -48,3 +48,5 @@ crawlerkit-py/build/
 crawlerkit-py/dist/
 crawlerkit-py/*.egg-info/
 crawlerkit-py/src/*.egg-info/
+
+internal/web/dist/*

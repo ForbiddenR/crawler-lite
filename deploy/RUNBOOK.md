@@ -129,12 +129,11 @@ the profile flow if one exists.
 | Status | `docker compose -f docker-compose.yml -f docker-compose.prod.yml ps` |
 | Stop stack | `make prod-down` |
 | Scale workers | `docker compose ... up -d --scale worker=4` |
-| Shell into master | `docker compose ... exec master sh` (note: distroless has **no** shell — use `exec master /master` for the hash-password utility only) |
+| Shell into master | `docker compose ... exec master sh` |
 | psql | `docker compose ... exec postgres psql -U crawler -d crawler` |
 
-The master image is **distroless** — no shell, no package manager. For
-debugging, run a temporary `postgres:16-alpine` sidecar or attach the
-data volume to a shell-equipped image.
+The master image uses an Alpine runtime, so `sh` and `apk` are available for
+basic container debugging. The master process still runs as a non-root user.
 
 ## 4. Backup & restore
 

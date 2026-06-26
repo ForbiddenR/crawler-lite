@@ -196,17 +196,17 @@ prod-ps: ## Show production stack status
 prod-migrate: ## Apply pending migrations to the prod database (one-shot goose container)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	: "${DATABASE_DSN:?set DATABASE_DSN in .env (host should be 'postgres')}"; \
-	$(COMPOSE_PROD) run --rm --no-deps \
+	docker run --rm \
+		--network crawler-lite_default \
 		-v "$(PWD)/db/migrations:/migrations:ro" \
 		-e GOOSE_DRIVER=postgres \
 		-e GOOSE_DBSTRING="$$DATABASE_DSN" \
-		--entrypoint sh \
-		golang:1.26-alpine -c '\
+		golang:1.26-alpine sh -c '\
 			set -e; \
 			echo "installing goose $(GOOSE_VERSION)…"; \
 			go install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION); \
-			/root/go/bin/goose -dir /migrations status; \
-			/root/go/bin/goose -dir /migrations up'
+			$$(go env GOPATH)/bin/goose -dir /migrations status; \
+			$$(go env GOPATH)/bin/goose -dir /migrations up'
 
 .PHONY: backup
 backup: ## Back up Postgres + MinIO to ./backups/<ts>/ (see deploy/backup.sh)

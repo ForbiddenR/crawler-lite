@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# Master image using a frontend bundle that was built before Docker runs.
+#
+# Use this for local testing when you want to avoid running Node/pnpm inside the
+# Docker build. The Go master embeds internal/web/dist via //go:embed, so this
+# Dockerfile expects that directory to already contain a real SPA build.
+#
+# Build frontend first from the repo root:
+#
+#   cd web && pnpm install && pnpm build && cd ..
+#   rm -rf internal/web/dist
+#   mkdir -p internal/web/dist
+#   cp -R web/dist/. internal/web/dist/
+#
+# Then build the image:
+#
+#   docker build \
+#     -f Dockerfile.master-prebuilt \
+#     --build-arg VERSION=dev \
+#     -t crawler-lite/crawler-lite-master:dev .
+#
+# Production/reproducible builds should generally keep using Dockerfile, which
+# builds the frontend inside Docker.
+
+ARG GO_VERSION=1.26
+ARG VERSION=dev
+
+FROM golang:${GO_VERSION}-alpine AS go-build
+ARG VERSION
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Fail fast if the caller forgot to copy web/dist into internal/web/dist.
+RUN test -f internal/web/dist/index.html || \
+    (echo "missing internal/web/dist/index.html; build the frontend and copy web/dist into internal/web/dist first" >&2; exit 1)
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X github.com/yourteam/crawler-lite/internal/version.Version=${VERSION}" \
+      -o /out/master ./cmd/master
+
+FROM alpine:3.20 AS runtime
+RUN adduser -D -H -u 65532 appuser
+USER appuser
+COPY --from=go-build /out/master /master
+EXPOSE 8000 9000
+ENTRYPOINT ["/master"]

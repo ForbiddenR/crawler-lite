@@ -1,6 +1,0 @@
-# This placeholder makes internal/web/dist/ exist in dev so the
-# //go:embed all:dist directive compiles. The real React build is
-# written here at image-build time (see the frontend-build stage in
-# Dockerfile). In dev dist/ contains only this file, so web.Handler()
-# returns a 404 handler and the master serves no frontend — devs hit
-# the Vite dev server on :5173 instead.

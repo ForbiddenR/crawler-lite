@@ -15,7 +15,8 @@
 services:
   # --- Data services: drop host port bindings in prod ----------------------
   postgres:
-    ports: !reset []
+    ports:
+      - "127.0.0.1:5433:5432"
     restart: always
     volumes:
       - pg_data:/var/lib/postgresql/data

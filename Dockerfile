@@ -42,9 +42,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -o /out/master ./cmd/master
 
 # --- 3. Runtime -------------------------------------------------------------
-# Distroless static: no shell, no package manager, ~2 MB base. The binary
-# is statically linked (CGO_ENABLED=0) so this works. Runs as non-root.
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+# Alpine runtime: keeps a small image while still providing sh/apk for basic
+# container debugging. The binary is statically linked (CGO_ENABLED=0). Runs as
+# non-root.
+FROM alpine:3.20 AS runtime
+RUN adduser -D -H -u 65532 appuser
+USER appuser
 COPY --from=go-build /out/master /master
 # :8000 = HTTP (REST + WS + SPA), :9000 = gRPC (workers).
 EXPOSE 8000 9000
