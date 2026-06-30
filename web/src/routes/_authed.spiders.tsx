@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router"
-import { type FormEvent, useState } from "react"
+import { type FormEvent, useEffect, useRef, useState } from "react"
 
 import { ApiError } from "@/api/client"
 import { spidersApi, tasksApi } from "@/api/resources"
@@ -18,11 +18,30 @@ function SpidersPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
+  const [selectedIDs, setSelectedIDs] = useState<number[]>([])
+  const [bulkResult, setBulkResult] = useState<{
+    tone: "success" | "error"
+    message: string
+  } | null>(null)
 
   const spiders = useQuery({
     queryKey: ["spiders"],
     queryFn: () => spidersApi.list(),
   })
+
+  const items = spiders.data?.items ?? []
+  const selectedSet = new Set(selectedIDs)
+  const allSelected = items.length > 0 && items.every((s) => selectedSet.has(s.id))
+  const someSelected = items.some((s) => selectedSet.has(s.id)) && !allSelected
+  const showToolbar = items.length > 0 || bulkResult !== null
+
+  useEffect(() => {
+    const visibleIDs = new Set(items.map((s) => s.id))
+    setSelectedIDs((prev) => {
+      const next = prev.filter((id) => visibleIDs.has(id))
+      return next.length === prev.length ? prev : next
+    })
+  }, [items])
 
   const sync = useMutation({
     mutationFn: (id: number) => spidersApi.sync(id),
@@ -37,10 +56,58 @@ function SpidersPage() {
     },
   })
 
-  const remove = useMutation({
-    mutationFn: (id: number) => spidersApi.remove(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spiders"] }),
+  const bulkRemove = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            await spidersApi.remove(id)
+            return { id, ok: true as const }
+          } catch (err) {
+            return { id, ok: false as const, message: getErrorMessage(err) }
+          }
+        }),
+      )
+
+      const deletedIDs = results.filter((r) => r.ok).map((r) => r.id)
+      const failed = results.filter(
+        (r): r is { id: number; ok: false; message: string } => !r.ok,
+      )
+      return {
+        deletedIDs,
+        failedCount: failed.length,
+        firstError: failed[0]?.message,
+      }
+    },
+    onSuccess: async ({ deletedIDs, failedCount, firstError }) => {
+      setSelectedIDs((prev) => prev.filter((id) => !deletedIDs.includes(id)))
+      await qc.invalidateQueries({ queryKey: ["spiders"] })
+      setBulkResult(buildBulkDeleteResult("spider", deletedIDs.length, failedCount, firstError))
+    },
   })
+
+  function toggleSelected(id: number) {
+    setBulkResult(null)
+    setSelectedIDs((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id],
+    )
+  }
+
+  function toggleAll(checked: boolean) {
+    setBulkResult(null)
+    setSelectedIDs(checked ? items.map((s) => s.id) : [])
+  }
+
+  function onDeleteSelected() {
+    const ids = selectedIDs.slice()
+    if (ids.length === 0) {
+      return
+    }
+    const noun = ids.length === 1 ? "spider" : "spiders"
+    if (confirm(`Delete ${ids.length} ${noun}?`)) {
+      bulkRemove.mutate(ids)
+    }
+  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-6">
@@ -54,10 +121,38 @@ function SpidersPage() {
       {showCreate && <CreateForm onDone={() => setShowCreate(false)} />}
 
       <Card>
+        {showToolbar && (
+          <CardHeader className="space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm text-zinc-600">
+                {selectedIDs.length} selected
+              </p>
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={selectedIDs.length === 0 || bulkRemove.isPending}
+                onClick={onDeleteSelected}
+              >
+                {bulkRemove.isPending
+                  ? "Deleting..."
+                  : `Delete selected${selectedIDs.length > 0 ? ` (${selectedIDs.length})` : ""}`}
+              </Button>
+            </div>
+            {bulkResult && (
+              <output
+                className={`block text-sm ${
+                  bulkResult.tone === "error" ? "text-red-600" : "text-emerald-600"
+                }`}
+              >
+                {bulkResult.message}
+              </output>
+            )}
+          </CardHeader>
+        )}
         <CardBody className="p-0">
           {spiders.isLoading ? (
             <p className="p-6 text-sm text-zinc-500">Loading...</p>
-          ) : (spiders.data?.items?.length ?? 0) === 0 ? (
+          ) : items.length === 0 ? (
             <p className="p-6 text-sm text-zinc-500">
               No spiders yet. Click <strong>New spider</strong> to add one.
             </p>
@@ -65,6 +160,14 @@ function SpidersPage() {
             <table className="w-full text-sm">
               <thead className="text-left text-zinc-500">
                 <tr className="border-b border-zinc-200">
+                  <th className="w-12 px-6 py-3">
+                    <SelectAllCheckbox
+                      checked={allSelected}
+                      indeterminate={someSelected}
+                      disabled={bulkRemove.isPending}
+                      onChange={toggleAll}
+                    />
+                  </th>
                   <th className="px-6 py-3 font-medium">Name</th>
                   <th className="px-6 py-3 font-medium">Entry</th>
                   <th className="px-6 py-3 font-medium">Source</th>
@@ -73,8 +176,18 @@ function SpidersPage() {
                 </tr>
               </thead>
               <tbody>
-                {(spiders.data?.items ?? []).map((s) => (
+                {items.map((s) => (
                   <tr key={s.id} className="border-b border-zinc-100 last:border-b-0">
+                    <td className="px-6 py-3 align-top">
+                      <input
+                        type="checkbox"
+                        checked={selectedSet.has(s.id)}
+                        disabled={bulkRemove.isPending}
+                        onChange={() => toggleSelected(s.id)}
+                        className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400"
+                        aria-label={`Select spider ${s.name}`}
+                      />
+                    </td>
                     <td className="px-6 py-3">
                       <Link
                         to="/spiders/$id"
@@ -125,18 +238,6 @@ function SpidersPage() {
                           onClick={() => run.mutate(s.id)}
                         >
                           Run
-                        </Button>
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={remove.isPending && remove.variables === s.id}
-                          onClick={() => {
-                            if (confirm(`Delete spider "${s.name}"?`)) {
-                              remove.mutate(s.id)
-                            }
-                          }}
-                        >
-                          Delete
                         </Button>
                       </div>
                     </td>
@@ -246,4 +347,71 @@ function CreateForm({ onDone }: { onDone: () => void }) {
       </CardBody>
     </Card>
   )
+}
+
+function SelectAllCheckbox({
+  checked,
+  indeterminate,
+  disabled,
+  onChange,
+}: {
+  checked: boolean
+  indeterminate: boolean
+  disabled?: boolean
+  onChange: (checked: boolean) => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = indeterminate
+    }
+  }, [indeterminate])
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.checked)}
+      className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400"
+      aria-label="Select all spiders"
+    />
+  )
+}
+
+function buildBulkDeleteResult(
+  singular: string,
+  deletedCount: number,
+  failedCount: number,
+  firstError?: string,
+) {
+  const plural = `${singular}s`
+  if (failedCount === 0) {
+    return {
+      tone: "success" as const,
+      message: `Deleted ${deletedCount} ${deletedCount === 1 ? singular : plural}.`,
+    }
+  }
+
+  let message = `Deleted ${deletedCount} of ${deletedCount + failedCount} selected ${plural}.`
+  if (deletedCount === 0) {
+    message = `Failed to delete ${failedCount} ${failedCount === 1 ? singular : plural}.`
+  }
+  if (firstError) {
+    message += ` ${firstError}`
+  }
+
+  return { tone: "error" as const, message }
+}
+
+function getErrorMessage(err: unknown) {
+  if (err instanceof ApiError) {
+    return err.message
+  }
+  if (err instanceof Error) {
+    return err.message
+  }
+  return "Delete failed"
 }
