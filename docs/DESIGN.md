@@ -298,8 +298,8 @@ sequenceDiagram
 
 部署上，crawler-lite 也延续了前面的职责拆分：master 少而集中，worker 多而可替换。
 
-- **开发环境**：本地起 Postgres、Redis、MinIO，再分别启动 master、worker 和前端开发服务。前端通过 Vite 把 API 和 WebSocket 请求代理到 master。
-- **生产环境**：master 通常保持单实例，承担调度和状态管理；worker 可以按需要横向扩容，用 `--scale` 多起副本。
+- **开发环境**：本地起 Postgres、Redis、MinIO，再分别启动 master、worker 和前端开发服务。前端代码里 API 地址用的是相对路径，请求发往"页面所在的源"；开发时页面由 Vite 在 5173 端口提供，Vite 的 dev 代理把 `/api`（含 WebSocket 升级）转发到 master 的 8000 端口，免去跨域配置。这只是开发期的便利，不是系统设计的一部分。
+- **生产环境**：前端构建产物被打进 master 二进制、由 master 自己托管，所以页面和 API 同源——请求直接落回 master，没有代理这一跳。master 通常保持单实例，承担调度和状态管理；worker 可以按需要横向扩容，用 `--scale` 多起副本。
 - **管理员初始化**：当前没有专门的管理 UI，管理员账号通过命令行生成密码哈希，再写入数据库。
 
 这个形态和系统设计是一致的：master 掌握状态，worker 不持状态并主动连接 master。于是扩容 worker 不是一次架构操作，而只是多启动几个执行节点。（生产硬化项：CORS 现阶段放开任意源、bcrypt cost 现阶段为默认值、module path 仍为占位符——后续开发按生产收紧并改名。）
