@@ -8,6 +8,10 @@ crawler-lite: a crawler platform for Python + Selenium spiders. Go master/worker
 
 Module path is the placeholder `github.com/yourteam/crawler-lite` — not yet renamed.
 
+> **Standalone project.** This directory has its own `go.mod` and is self-contained. It happens to be nested at `/workspace/crawlab/crawler-lite`, but the parent `/workspace/crawlab` is a **different, unrelated project** (the upstream CrawLab repo) — do not mix the two. Run all Go/frontend commands from this directory.
+
+> **Design rationale.** `docs/DESIGN.md` is the discussion-oriented design document (architecture intent, storage layering, end-to-end flows). Read it for the "why". It describes the **current-stage preliminary design**: simplified mechanisms that will be refined later are marked inline as 「（现阶段简化：…，后续开发…）」 — these are intentional, not bugs to fix. Code comments carry the matching "v1 / week N / for production" markers.
+
 ## Commands
 
 **First-time setup:** `make tools && make gen && make up && make migrate && make tidy` (Go side); `cd web && pnpm install` (frontend); `make py-install` (Python SDK, editable).
