@@ -137,7 +137,7 @@ TaskStatus 第一版定稿为：
 
 ```text
 pending
- dispatching
+dispatching
 running
 canceling
 success
@@ -349,11 +349,95 @@ skipped 计入 completed_items，但不计入失败
 
 ---
 
-## 7. Task API 定稿
+## 7. 对外 REST API 通用约定
 
-Task API 面向前端、管理后台和外部调用方。
+Task / Bot / Schedule / Result / Artifact / Log API 面向前端、管理后台和外部系统。第一版 API 不只列路径，还需要明确字段语义，避免后续前后端和 SDK 对接时各自理解不一致。
 
-核心接口：
+### 7.1 API 基本约定
+
+| 项 | 约定 |
+|---|---|
+| 协议 | HTTP + JSON |
+| 鉴权 | Bearer Token / Session，具体实现可沿用现有用户体系 |
+| 时间格式 | RFC3339 字符串，例如 `2026-07-14T10:30:00Z` |
+| ID 类型 | 对外统一按 string 处理，例如 `bot_xxx`、`task_xxx`、`item_xxx`；内部数据库可以自行选择 bigint 或 uuid |
+| JSON 字段命名 | snake_case |
+| 空值 | 不存在或无值用 `null`，不要用空字符串表达未设置 |
+| 大文件上传 | 通过 multipart 或预签名/内部上传接口；普通 JSON API 不直接传大文件内容 |
+| 敏感字段 | password、token、secret、cookie、authorization 等字段必须脱敏或禁止返回 |
+
+成功响应建议统一包一层：
+
+```json
+{
+  "data": {},
+  "request_id": "req_xxx"
+}
+```
+
+列表响应：
+
+```json
+{
+  "data": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 100
+  },
+  "request_id": "req_xxx"
+}
+```
+
+错误响应：
+
+```json
+{
+  "error": {
+    "code": "INVALID_INPUT",
+    "message": "bot_id is required",
+    "detail": {
+      "field": "bot_id"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+常见 HTTP 状态码：
+
+| 状态码 | 含义 | 示例 |
+|---|---|---|
+| `200` | 查询或操作成功 | 获取 Task 详情成功 |
+| `201` | 创建成功 | 创建 Bot / Task / Schedule 成功 |
+| `400` | 请求格式错误 | JSON 解析失败、字段类型不对 |
+| `401` | 未认证 | 未登录或 token 失效 |
+| `403` | 无权限 | 没有运行 Bot 或取消 Task 的权限 |
+| `404` | 资源不存在 | task_id 不存在 |
+| `409` | 状态冲突 | 终态 Task 不能取消、重复 code |
+| `422` | 业务校验失败 | cron 非法、input_source 与输入字段不匹配 |
+| `500` | 系统内部错误 | 数据库或存储异常 |
+
+### 7.2 通用分页与过滤字段
+
+列表接口统一支持：
+
+| Query 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `page` | integer | 否 | `1` | 页码，从 1 开始 |
+| `page_size` | integer | 否 | `20` | 每页数量，建议最大 `100` |
+| `sort` | string | 否 | `-created_at` | 排序字段，前缀 `-` 表示倒序 |
+| `created_from` | string | 否 | `null` | 创建时间起始，RFC3339 |
+| `created_to` | string | 否 | `null` | 创建时间结束，RFC3339 |
+| `q` | string | 否 | `null` | 模糊搜索关键字，具体匹配字段由资源决定 |
+
+---
+
+## 8. Task API 定稿
+
+Task API 面向前端、管理后台和外部调用方。Task 是一次 Python 脚本执行，也是第一版调度单元。
+
+### 8.1 接口列表
 
 ```http
 POST   /api/tasks
@@ -361,52 +445,238 @@ GET    /api/tasks
 GET    /api/tasks/{task_id}
 POST   /api/tasks/{task_id}/cancel
 POST   /api/tasks/{task_id}/retry
-```
 
-详情相关接口：
-
-```http
 GET    /api/tasks/{task_id}/items
 GET    /api/tasks/{task_id}/logs
 GET    /api/tasks/{task_id}/results
 GET    /api/tasks/{task_id}/artifacts
 ```
 
-### 7.1 run_type
+### 8.2 Task 对象字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Task ID，对外唯一 |
+| `bot_id` | string | 是 | 所属 Bot ID |
+| `bot_code` | string | 是 | Bot 稳定编码，冗余保存用于列表展示和历史追溯 |
+| `bot_version_id` | string | 否 | 本次执行使用的 BotVersion；为空表示使用创建时的 current version 快照 |
+| `bot_snapshot` | object | 是 | Task 创建时复制的 Bot 关键字段，保证历史 Task 不受 Bot 后续修改影响 |
+| `source_task_id` | string | 否 | 来源 Task ID；重试、重新执行时填写 |
+| `schedule_id` | string | 否 | 来源 Schedule ID；手动/API 创建为空 |
+| `schedule_run_id` | string | 否 | 来源 ScheduleRun ID |
+| `worker_id` | string | 否 | 当前或最后执行该 Task 的 Worker ID |
+| `assignment_id` | string | 否 | 本次派发 ID，用于 Worker 上报 fencing |
+| `run_type` | string | 是 | 运行类型，见 `8.3` |
+| `status` | string | 是 | TaskStatus |
+| `priority` | integer | 是 | 调度优先级，数值越大越优先；默认 `0` |
+| `entrypoint` | string | 是 | 入口文件，例如 `main.py` |
+| `input_source` | string | 是 | 输入来源，见 `8.4` |
+| `input_params` | object | 否 | 小体积 JSON 输入参数 |
+| `input_file_id` | string | 否 | 输入文件 ID，例如 Excel 文件；`input_source=file` 时使用 |
+| `config` | object | 否 | 本次 Task 覆盖 Bot 默认配置的运行配置 |
+| `requirements` | object | 否 | 本次运行要求，例如 runtime、image、capabilities、labels |
+| `timeout_seconds` | integer | 否 | Task 整体超时时间，未设置时使用 Bot 默认值或系统默认值 |
+| `cancel_requested_at` | string | 否 | 用户请求取消时间 |
+| `cancel_reason` | string | 否 | 取消原因 |
+| `cancel_grace_period_seconds` | integer | 是 | 取消宽限期，默认 `30` |
+| `dispatching_at` | string | 否 | 进入 dispatching 的时间 |
+| `dispatch_deadline_at` | string | 否 | Worker ack/start 截止时间 |
+| `started_at` | string | 否 | Worker 开始执行脚本时间 |
+| `finished_at` | string | 否 | Task 进入终态时间 |
+| `timeout_at` | string | 否 | 系统判定整体超时的时间 |
+| `created_by` | string | 是 | 创建人用户 ID 或 API token 主体 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+| `summary` | object | 否 | 脚本或系统生成的摘要信息，用于详情页概览 |
+| `error_code` | string | 否 | 失败错误码，例如 `SCRIPT_EXIT_NONZERO` |
+| `error_message` | string | 否 | 面向用户的简短错误说明 |
+| `error_detail` | object | 否 | 调试详情；返回给普通用户前必须脱敏 |
+
+统计字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `total_items` | integer | TaskItem 总数，可运行中动态增长 |
+| `pending_items` | integer | 未开始的 TaskItem 数 |
+| `running_items` | integer | 正在处理的 TaskItem 数 |
+| `success_items` | integer | 成功 TaskItem 数 |
+| `failed_items` | integer | 失败 TaskItem 数 |
+| `skipped_items` | integer | 跳过 TaskItem 数 |
+| `canceled_items` | integer | 取消 TaskItem 数 |
+| `timeout_items` | integer | 超时 TaskItem 数 |
+| `completed_items` | integer | 已完成 TaskItem 数，等于 success + failed + skipped + canceled + timeout |
+| `total_results` | integer | 结构化 Result 数量 |
+| `artifact_count` | integer | Artifact 数量 |
+| `log_count` | integer | 日志行数 |
+| `error_log_count` | integer | error 级别日志行数 |
+| `progress_rate` | number/null | `completed_items / total_items`；`total_items=0` 时返回 `null` |
+| `success_rate` | number/null | `success_items / total_items` |
+| `failed_rate` | number/null | `failed_items / total_items` |
+| `timeout_rate` | number/null | `timeout_items / total_items` |
+| `error_rate` | number/null | `(failed_items + timeout_items) / total_items` |
+
+### 8.3 run_type
 
 第一版支持：
 
-```text
-manual
-schedule
-retry_all
-retry_failed_items
-rerun
-api
-```
+| 值 | 含义 | 创建来源 |
+|---|---|---|
+| `manual` | 人工在后台点击运行 | Bot 详情页 / Task 创建页 |
+| `schedule` | Schedule 到点触发 | Schedule Runner |
+| `retry_all` | 对原 Task 全量重试 | Retry API |
+| `retry_failed_items` | 只重试失败/超时 TaskItem | Retry API |
+| `rerun` | 成功或任意历史 Task 重新执行 | Rerun 操作 |
+| `api` | 外部系统调用 API 创建 | External API |
 
-### 7.2 input_source
+### 8.4 input_source
 
 第一版支持：
 
+| 值 | 含义 | 相关字段 |
+|---|---|---|
+| `file` | 输入来自上传文件，例如 Excel | `input_file_id` |
+| `params` | 输入来自 JSON 参数 | `input_params` |
+| `task_items` | 输入来自旧 Task 的部分 TaskItem | `source_task_id`、系统生成的 retry input |
+| `none` | 无显式输入 | 无 |
+
+约束：
+
 ```text
-file
-params
-task_items
-none
+input_source = file       时，input_file_id 必填
+input_source = params     时，input_params 必填或默认为 {}
+input_source = task_items 时，source_task_id 必填，且只能由 retry_failed_items 创建
+input_source = none       时，不应传 input_file_id
 ```
 
-### 7.3 创建 Task
+### 8.5 创建 Task
 
-创建成功后：
+```http
+POST /api/tasks
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `bot_id` | string | 是 | - | 要运行的 Bot |
+| `bot_version_id` | string | 否 | 当前版本 | 指定版本；不传则使用 Bot 当前启用版本 |
+| `run_type` | string | 否 | `manual` 或 `api` | 后台手动创建为 `manual`，外部 token 创建为 `api` |
+| `input_source` | string | 是 | - | 输入来源 |
+| `input_file_id` | string | 否 | `null` | 已上传输入文件 ID |
+| `input_params` | object | 否 | `{}` | JSON 参数 |
+| `config` | object | 否 | `{}` | 本次运行配置覆盖项 |
+| `requirements` | object | 否 | `{}` | 本次运行要求覆盖项 |
+| `priority` | integer | 否 | `0` | 调度优先级 |
+| `timeout_seconds` | integer | 否 | Bot 默认值 | 整体超时 |
+| `idempotency_key` | string | 否 | `null` | 外部系统防重复创建；同一创建主体下唯一 |
+
+请求示例：
+
+```json
+{
+  "bot_id": "bot_oem_approval",
+  "input_source": "file",
+  "input_file_id": "file_20260714_excel",
+  "config": {
+    "dry_run": false
+  },
+  "requirements": {
+    "runtime": "python3.12",
+    "capabilities": ["selenium", "chromium"],
+    "labels": {
+      "region": "cn-east"
+    }
+  },
+  "timeout_seconds": 3600,
+  "priority": 0,
+  "idempotency_key": "external-order-20260714-001"
+}
+```
+
+响应：
+
+```json
+{
+  "data": {
+    "id": "task_xxx",
+    "bot_id": "bot_oem_approval",
+    "run_type": "manual",
+    "status": "pending",
+    "input_source": "file",
+    "created_at": "2026-07-14T10:30:00Z"
+  }
+}
+```
+
+创建成功只表示 Task 进入调度队列：
 
 ```text
 Task.status = pending
 ```
 
-创建成功只表示进入调度队列，不表示已经开始或完成。
+不表示 Worker 已经开始执行。
 
-### 7.4 取消 Task
+### 8.6 查询 Task 列表
+
+```http
+GET /api/tasks
+```
+
+Query 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `bot_id` | string | 按 Bot 过滤 |
+| `status` | string | 按单个状态过滤 |
+| `statuses` | string | 多状态过滤，逗号分隔，例如 `pending,running` |
+| `run_type` | string | 按运行类型过滤 |
+| `worker_id` | string | 按 Worker 过滤 |
+| `schedule_id` | string | 按 Schedule 过滤 |
+| `source_task_id` | string | 查询某个 Task 派生出的重试/重跑 Task |
+| `created_by` | string | 按创建人过滤 |
+| `q` | string | 搜索 task id、bot code、summary |
+
+列表项必须返回足够支撑列表页的信息：
+
+```text
+id, bot_id, bot_code, run_type, status, worker_id,
+created_at, started_at, finished_at,
+total_items, completed_items, success_items, failed_items, timeout_items,
+progress_rate, success_rate, error_rate,
+error_code, error_message
+```
+
+### 8.7 查询 Task 详情
+
+```http
+GET /api/tasks/{task_id}
+```
+
+详情页响应应包含：
+
+| 字段组 | 说明 |
+|---|---|
+| 基础信息 | Task 对象完整字段 |
+| Bot 快照 | `bot_snapshot`，展示当时执行的 Bot 名称、版本、入口文件 |
+| 输入摘要 | `input_source`、`input_file_id`、`input_params` 摘要，敏感字段脱敏 |
+| 运行配置 | `config`、`requirements` |
+| 调度信息 | `worker_id`、`assignment_id`、dispatch 时间、start/finish 时间 |
+| 统计信息 | 所有计数和百分比字段 |
+| 错误信息 | `error_code`、`error_message`、`error_detail` |
+| 操作能力 | `can_cancel`、`can_retry`、`can_rerun`，由后端根据状态和权限计算 |
+
+### 8.8 取消 Task
+
+```http
+POST /api/tasks/{task_id}/cancel
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `reason` | string | 否 | `user_requested` | 取消原因 |
+| `cancel_grace_period_seconds` | integer | 否 | `30` | 优雅退出等待时间 |
 
 可取消状态：
 
@@ -414,6 +684,7 @@ Task.status = pending
 pending
 dispatching
 running
+canceling  # 幂等返回当前取消中状态
 ```
 
 不可取消状态：
@@ -437,22 +708,40 @@ Task 最终变为 canceled
 未终态 TaskItem 标记为 canceled
 ```
 
-默认：
+响应字段：
 
-```text
-cancel_grace_period = 30s
+| 字段 | 说明 |
+|---|---|
+| `id` | Task ID |
+| `status` | `canceled` 或 `canceling` |
+| `cancel_requested_at` | 取消请求时间 |
+| `cancel_reason` | 取消原因 |
+
+### 8.9 重试 Task
+
+```http
+POST /api/tasks/{task_id}/retry
 ```
-
-### 7.5 重试 Task
 
 重试永远创建新 Task，不修改原 Task。
 
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `mode` | string | 是 | - | `all` 或 `failed_items` |
+| `reason` | string | 否 | `user_requested` | 重试原因 |
+| `config` | object | 否 | 原 Task config | 可覆盖新 Task 的运行配置 |
+| `requirements` | object | 否 | 原 Task requirements | 可覆盖新 Task 的运行要求 |
+| `priority` | integer | 否 | 原 Task priority | 新 Task 优先级 |
+| `idempotency_key` | string | 否 | `null` | 防重复创建 |
+
 支持模式：
 
-```text
-all
-failed_items
-```
+| mode | 新 Task run_type | 输入构造 |
+|---|---|---|
+| `all` | `retry_all` | 复用原 Task 的 input_source、input_file_id、input_params |
+| `failed_items` | `retry_failed_items` | 从原 Task 中筛选 `failed`、`timeout` 的 TaskItem 构造输入 |
 
 可重试状态：
 
@@ -480,20 +769,31 @@ canceled
 
 成功任务重新执行使用 `rerun`，不叫 retry。
 
+响应返回新 Task：
+
+```json
+{
+  "data": {
+    "id": "task_new",
+    "source_task_id": "task_old",
+    "run_type": "retry_failed_items",
+    "status": "pending"
+  }
+}
+```
+
 ---
 
-## 8. TaskItem API 定稿
+## 9. TaskItem API 定稿
 
-核心查询接口：
+TaskItem 表示脚本运行过程中动态上报的执行明细，是观测和统计单元，不是第一版调度单元。
+
+### 9.1 接口列表
 
 ```http
 GET /api/tasks/{task_id}/items
 GET /api/tasks/{task_id}/items/{item_id}
-```
 
-关联查询接口：
-
-```http
 GET /api/tasks/{task_id}/items/{item_id}/logs
 GET /api/tasks/{task_id}/items/{item_id}/results
 GET /api/tasks/{task_id}/items/{item_id}/artifacts
@@ -507,52 +807,97 @@ POST  /api/task-items/{item_id}/cancel
 POST  /api/task-items/{item_id}/retry
 ```
 
-TaskItem 字段：
+### 9.2 TaskItem 对象字段
 
-```text
-id
-task_id
-type
-key
-index
-status
-input_data
-output_data
-error_code
-error_message
-error_detail
-summary
-result_count
-artifact_count
-log_count
-created_at
-started_at
-finished_at
-duration_ms
-updated_at
-```
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | TaskItem ID |
+| `task_id` | string | 是 | 所属 Task ID |
+| `bot_id` | string | 是 | 冗余 Bot ID，便于查询 |
+| `type` | string | 是 | 明细类型，推荐值见 `9.3` |
+| `key` | string | 否 | 业务唯一键，例如 Excel 行号、URL、外部单号 |
+| `index` | integer | 否 | 顺序号，从 0 开始，前端展示为 `index + 1` |
+| `status` | string | 是 | TaskItemStatus |
+| `input_data` | object | 否 | 单项输入数据，敏感字段必须脱敏或避免写入 |
+| `output_data` | object | 否 | 单项输出摘要，不保存大文件内容 |
+| `error_code` | string | 否 | 单项失败错误码 |
+| `error_message` | string | 否 | 单项失败简短说明 |
+| `error_detail` | object | 否 | 单项失败详情，必须可脱敏 |
+| `summary` | object | 否 | 面向详情页展示的业务摘要 |
+| `idempotency_key` | string | 否 | SDK 上报幂等键，同一 Task 内唯一 |
+| `result_count` | integer | 是 | 关联 Result 数量 |
+| `artifact_count` | integer | 是 | 关联 Artifact 数量 |
+| `log_count` | integer | 是 | 关联日志数量 |
+| `error_log_count` | integer | 是 | 关联 error 日志数量 |
+| `created_at` | string | 是 | 创建时间 |
+| `started_at` | string | 否 | 开始处理时间 |
+| `finished_at` | string | 否 | 进入终态时间 |
+| `duration_ms` | integer | 否 | 执行耗时，毫秒 |
+| `updated_at` | string | 是 | 更新时间 |
+
+### 9.3 TaskItem type 推荐值
 
 `type` 不强枚举，推荐值：
 
-```text
-record
-url
-page
-query
-file
-step
-custom
+| 值 | 含义 | 示例 |
+|---|---|---|
+| `record` | 一条业务记录 | Excel 中一行审批记录 |
+| `url` | 一个 URL | 商品详情页 URL |
+| `page` | 一个页面或分页 | 第 3 页列表 |
+| `query` | 一个查询条件 | 订单号 / VIN |
+| `file` | 一个文件 | 待上传附件 |
+| `step` | 一个处理步骤 | 登录、提交、校验 |
+| `custom` | 自定义类型 | 业务方自定义 |
+
+### 9.4 查询 TaskItem 列表
+
+```http
+GET /api/tasks/{task_id}/items
 ```
 
-`index` 从 0 开始，前端展示为 `index + 1`。
+Query 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `status` | string | 单状态过滤 |
+| `statuses` | string | 多状态过滤，逗号分隔 |
+| `type` | string | 按 TaskItem 类型过滤 |
+| `key` | string | 按业务 key 精确查询 |
+| `q` | string | 搜索 key、summary、error_message |
+| `has_error` | boolean | 是否只看有错误的 item |
+| `sort` | string | 默认 `index`，也可 `-created_at`、`-finished_at` |
+
+列表项至少返回：
+
+```text
+id, task_id, type, key, index, status,
+summary, error_code, error_message,
+result_count, artifact_count, log_count,
+created_at, started_at, finished_at, duration_ms
+```
+
+### 9.5 查询 TaskItem 详情
+
+```http
+GET /api/tasks/{task_id}/items/{item_id}
+```
+
+详情页响应应包含完整 TaskItem 对象，并可以附带最近日志摘要：
+
+| 字段 | 说明 |
+|---|---|
+| `data` | TaskItem 完整对象 |
+| `recent_logs` | 最近 N 条日志，可选，前端也可以单独调用 logs 接口 |
+| `related_results_count` | 关联 Result 数量 |
+| `related_artifacts_count` | 关联 Artifact 数量 |
 
 ---
 
-## 9. Bot API 定稿
+## 10. Bot API 定稿
 
-Bot 是自动化脚本定义。
+Bot 是自动化脚本定义，不是一次执行。
 
-核心接口：
+### 10.1 接口列表
 
 ```http
 POST   /api/bots
@@ -562,46 +907,66 @@ PATCH  /api/bots/{bot_id}
 POST   /api/bots/{bot_id}/run
 POST   /api/bots/{bot_id}/enable
 POST   /api/bots/{bot_id}/disable
-```
 
-版本接口：
-
-```http
 GET    /api/bots/{bot_id}/versions
 POST   /api/bots/{bot_id}/versions
 GET    /api/bots/{bot_id}/versions/{version_id}
 ```
 
-Bot 字段：
+### 10.2 Bot 对象字段
 
-```text
-id
-name
-code
-description
-category
-tags
-status
-entrypoint
-script_source
-current_version_id
-default_input_source
-input_params_schema
-default_config
-default_requirements
-created_by
-created_at
-updated_at
-```
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Bot ID |
+| `name` | string | 是 | 展示名称，例如“主机厂审批提交 Bot” |
+| `code` | string | 是 | 稳定唯一编码，只允许字母、数字、下划线、短横线；创建后不建议修改 |
+| `description` | string | 否 | 说明 |
+| `category` | string | 否 | 分类，例如 `approval`、`crawler`、`sync` |
+| `tags` | array<string> | 否 | 标签 |
+| `status` | string | 是 | BotStatus |
+| `entrypoint` | string | 是 | 入口文件，例如 `main.py` |
+| `script_source` | string | 是 | 脚本来源，第一版实际实现 `upload` |
+| `current_version_id` | string | 否 | 当前版本 ID |
+| `default_input_source` | string | 是 | 默认输入来源 |
+| `input_params_schema` | object | 否 | JSON Schema，用于前端生成参数表单和后端校验 |
+| `default_config` | object | 否 | 默认运行配置 |
+| `default_requirements` | object | 否 | 默认运行要求 |
+| `created_by` | string | 是 | 创建人 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+| `archived_at` | string | 否 | 归档时间 |
 
 BotStatus：
 
-```text
-draft
-enabled
-disabled
-archived
+| 值 | 含义 |
+|---|---|
+| `draft` | 草稿，不能被 Schedule 自动触发 |
+| `enabled` | 启用，可以运行 |
+| `disabled` | 禁用，不能创建新 Task |
+| `archived` | 已归档，默认列表隐藏 |
+
+### 10.3 创建 Bot
+
+```http
+POST /api/bots
 ```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `name` | string | 是 | - | Bot 名称 |
+| `code` | string | 是 | - | 唯一编码 |
+| `description` | string | 否 | `null` | 描述 |
+| `category` | string | 否 | `null` | 分类 |
+| `tags` | array<string> | 否 | `[]` | 标签 |
+| `entrypoint` | string | 是 | - | 入口文件，例如 `main.py` |
+| `script_source` | string | 是 | `upload` | 脚本来源 |
+| `source_file_id` | string | 否 | `null` | 已上传脚本包 ID；`script_source=upload` 时使用 |
+| `default_input_source` | string | 是 | - | 默认输入来源 |
+| `input_params_schema` | object | 否 | `{}` | 参数 schema |
+| `default_config` | object | 否 | `{}` | 默认配置 |
+| `default_requirements` | object | 否 | `{}` | 默认运行要求 |
 
 第一版脚本来源实际实现：
 
@@ -617,17 +982,68 @@ image
 inline
 ```
 
-`entrypoint` 第一版保存相对路径，例如：
+### 10.4 更新 Bot
 
-```text
-main.py
+```http
+PATCH /api/bots/{bot_id}
 ```
 
-Worker Runtime 负责使用固定命令运行：
+允许更新字段：
 
 ```text
-python main.py
+name
+description
+category
+tags
+entrypoint
+source_file_id
+script_source
+default_input_source
+input_params_schema
+default_config
+default_requirements
 ```
+
+规则：
+
+```text
+影响执行行为的字段变化时必须创建新的 BotVersion
+Bot 更新不影响历史 Task
+已经创建的 Task 使用创建时的 bot_snapshot
+code 第一版不建议修改，如允许修改必须保证唯一且记录审计
+```
+
+### 10.5 运行 Bot
+
+```http
+POST /api/bots/{bot_id}/run
+```
+
+这是创建 Task 的便捷接口，语义等价于：
+
+```http
+POST /api/tasks
+```
+
+请求字段与 `POST /api/tasks` 基本一致，但 `bot_id` 来自 path，不需要在 body 中重复传。
+
+### 10.6 BotVersion 字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | BotVersion ID |
+| `bot_id` | string | 是 | 所属 Bot |
+| `version` | integer | 是 | 版本号，从 1 递增 |
+| `script_source` | string | 是 | 脚本来源 |
+| `source_file_id` | string | 否 | 脚本包文件 ID |
+| `entrypoint` | string | 是 | 入口文件 |
+| `input_params_schema` | object | 否 | 参数 schema 快照 |
+| `default_input_source` | string | 是 | 默认输入来源快照 |
+| `default_config` | object | 否 | 默认配置快照 |
+| `default_requirements` | object | 否 | 默认运行要求快照 |
+| `change_note` | string | 否 | 版本说明 |
+| `created_by` | string | 是 | 创建人 |
+| `created_at` | string | 是 | 创建时间 |
 
 BotVersion 原则：
 
@@ -640,7 +1056,7 @@ Bot 更新不影响历史 Task
 
 ---
 
-## 10. Worker 通信方案定稿
+## 11. Worker 通信方案定稿
 
 第一版采用：
 
@@ -664,7 +1080,7 @@ service WorkerControlService {
 }
 ```
 
-### 10.1 Worker -> Master 消息
+### 11.1 Worker -> Master 消息
 
 第一版消息：
 
@@ -679,7 +1095,7 @@ CancelResult
 LogBatch
 ```
 
-### 10.2 Master -> Worker 消息
+### 11.2 Master -> Worker 消息
 
 第一版消息：
 
@@ -690,7 +1106,7 @@ CancelTask
 Ping
 ```
 
-### 10.3 Worker 调度匹配规则
+### 11.3 Worker 调度匹配规则
 
 Worker 必须满足：
 
@@ -712,7 +1128,7 @@ load_score = current_running / max_concurrency
 
 选择 `load_score` 最小的 Worker。
 
-### 10.4 幂等字段
+### 11.4 幂等字段
 
 关键字段：
 
@@ -733,7 +1149,7 @@ Task 终态不可覆盖
 Worker 断线重连后必须 running_tasks 对账
 ```
 
-### 10.5 Worker 离线处理
+### 11.5 Worker 离线处理
 
 Worker 心跳超时或 stream 断开超过超时时间：
 
@@ -751,7 +1167,7 @@ error_code = WORKER_OFFLINE
 
 ---
 
-## 11. Worker Runtime API / Python SDK 定稿
+## 12. Worker Runtime API / Python SDK 定稿
 
 Worker Runtime 是 Python 脚本和平台之间的本地代理。
 
@@ -837,7 +1253,7 @@ secrets
 
 ---
 
-## 12. Schedule API 定稿
+## 13. Schedule API 定稿
 
 Schedule 是定时触发规则，不是执行记录。
 
@@ -847,7 +1263,7 @@ Schedule 是定时触发规则，不是执行记录。
 Bot -> Schedule -> ScheduleRun -> Task
 ```
 
-核心接口：
+### 13.1 接口列表
 
 ```http
 POST   /api/schedules
@@ -861,29 +1277,33 @@ GET    /api/schedules/{schedule_id}/runs
 GET    /api/schedule-runs/{run_id}
 ```
 
-Schedule 字段：
+### 13.2 Schedule 对象字段
 
-```text
-id
-name
-description
-bot_id
-cron
-timezone
-input_source
-input_params
-config
-requirements
-overlap_policy
-missed_run_policy
-max_parallel_runs
-status
-last_run_at
-next_run_at
-created_by
-created_at
-updated_at
-```
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Schedule ID |
+| `name` | string | 是 | 定时任务名称 |
+| `description` | string | 否 | 说明 |
+| `bot_id` | string | 是 | 被触发的 Bot |
+| `bot_version_id` | string | 否 | 固定版本；为空表示触发时使用 Bot 当前启用版本 |
+| `cron` | string | 是 | 标准 5 段 cron 表达式 |
+| `timezone` | string | 是 | cron 解释时区，例如 `Asia/Shanghai` |
+| `input_source` | string | 是 | 每次触发创建 Task 时的输入来源 |
+| `input_file_id` | string | 否 | 定时执行固定输入文件时使用；也可为空，由脚本自行拉取数据 |
+| `input_params` | object | 否 | 每次触发传给 Task 的 JSON 参数 |
+| `config` | object | 否 | 每次触发传给 Task 的运行配置覆盖项 |
+| `requirements` | object | 否 | 每次触发传给 Task 的运行要求覆盖项 |
+| `overlap_policy` | string | 是 | 到点时上一轮未完成的处理策略 |
+| `missed_run_policy` | string | 是 | Master 停机或延迟导致错过触发时间时的处理策略 |
+| `max_parallel_runs` | integer | 是 | `overlap_policy=parallel` 时允许的最大并行 Task 数 |
+| `status` | string | 是 | ScheduleStatus |
+| `last_run_at` | string | 否 | 最近一次触发决策时间，不一定创建了 Task |
+| `last_task_id` | string | 否 | 最近一次成功创建的 Task ID |
+| `next_run_at` | string | 否 | 下一次计划触发时间，用于前端展示 |
+| `created_by` | string | 是 | 创建人 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+| `archived_at` | string | 否 | 归档时间 |
 
 cron 使用标准 5 段表达式：
 
@@ -891,75 +1311,245 @@ cron 使用标准 5 段表达式：
 minute hour day-of-month month day-of-week
 ```
 
-cron 按 `timezone` 解释。
+cron 按 `timezone` 解释。第一版不建议使用秒级 cron，避免调度频率过高。
 
 ScheduleStatus：
 
-```text
-enabled
-disabled
-archived
-```
+| 值 | 含义 |
+|---|---|
+| `enabled` | 启用，到点会触发 |
+| `disabled` | 禁用，到点不会触发 |
+| `archived` | 归档，默认列表隐藏且不可触发 |
 
-overlap_policy：
+### 13.3 overlap_policy
 
-```text
-skip
-queue
-replace
-parallel
-```
+| 值 | 含义 | 第一版建议 |
+|---|---|---|
+| `skip` | 如果上一轮仍有 active Task，本轮跳过，只记录 ScheduleRun | MVP 默认实现 |
+| `queue` | 到点后排队，等上一轮结束再创建 Task | 预留 |
+| `replace` | 取消上一轮并创建新 Task | 预留，风险较高 |
+| `parallel` | 允许并行创建多个 Task | 可作为后续增强 |
 
-第一版重点实现：
-
-```text
-skip
-parallel
-```
-
-默认：
+active Task 状态：
 
 ```text
-skip
+pending
+dispatching
+running
+canceling
 ```
 
-missed_run_policy：
+第一版默认：
 
 ```text
-skip
-run_once
+overlap_policy = skip
 ```
 
-默认：
+### 13.4 missed_run_policy
+
+| 值 | 含义 |
+|---|---|
+| `skip` | 错过的触发不补跑 |
+| `run_once` | 如果错过多次，只补跑一次 |
+
+第一版默认建议：
 
 ```text
-run_once
+missed_run_policy = skip
 ```
+
+如果团队更重视“业务不能漏跑”，可以把默认值调整为 `run_once`，但需要在 ScheduleRun 中记录补跑原因。
+
+### 13.5 创建 Schedule
+
+```http
+POST /api/schedules
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `name` | string | 是 | - | Schedule 名称 |
+| `description` | string | 否 | `null` | 描述 |
+| `bot_id` | string | 是 | - | 目标 Bot |
+| `bot_version_id` | string | 否 | `null` | 固定执行版本 |
+| `cron` | string | 是 | - | 5 段 cron |
+| `timezone` | string | 否 | `Asia/Shanghai` | 时区 |
+| `input_source` | string | 是 | - | 输入来源 |
+| `input_file_id` | string | 否 | `null` | 输入文件 |
+| `input_params` | object | 否 | `{}` | JSON 输入参数 |
+| `config` | object | 否 | `{}` | 运行配置 |
+| `requirements` | object | 否 | `{}` | 运行要求 |
+| `overlap_policy` | string | 否 | `skip` | 重叠策略 |
+| `missed_run_policy` | string | 否 | `skip` | 错过触发策略 |
+| `max_parallel_runs` | integer | 否 | `1` | 最大并行数 |
+| `enabled` | boolean | 否 | `true` | 是否创建后立即启用 |
+
+请求示例：
+
+```json
+{
+  "name": "每天 9 点提交审批",
+  "bot_id": "bot_oem_approval",
+  "cron": "0 9 * * *",
+  "timezone": "Asia/Shanghai",
+  "input_source": "params",
+  "input_params": {
+    "business_date": "today"
+  },
+  "overlap_policy": "skip",
+  "missed_run_policy": "skip"
+}
+```
+
+创建成功后返回 Schedule 对象，并计算 `next_run_at`。
+
+### 13.6 查询 Schedule 列表
+
+```http
+GET /api/schedules
+```
+
+Query 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `bot_id` | string | 按 Bot 过滤 |
+| `status` | string | `enabled`、`disabled`、`archived` |
+| `q` | string | 搜索 name、description |
+| `include_archived` | boolean | 是否包含归档数据，默认 false |
+
+列表项至少返回：
+
+```text
+id, name, bot_id, cron, timezone, status,
+overlap_policy, missed_run_policy,
+last_run_at, last_task_id, next_run_at,
+created_at, updated_at
+```
+
+### 13.7 更新 / 启停 Schedule
+
+```http
+PATCH /api/schedules/{schedule_id}
+POST  /api/schedules/{schedule_id}/enable
+POST  /api/schedules/{schedule_id}/disable
+```
+
+允许 PATCH 的字段：
+
+```text
+name
+description
+bot_version_id
+cron
+timezone
+input_source
+input_file_id
+input_params
+config
+requirements
+overlap_policy
+missed_run_policy
+max_parallel_runs
+```
+
+规则：
+
+```text
+修改 cron/timezone 后必须重新计算 next_run_at
+禁用 Schedule 不影响已经创建的 Task
+归档 Schedule 后不再触发，但历史 ScheduleRun 保留
+```
+
+### 13.8 手动触发 Schedule
+
+```http
+POST /api/schedules/{schedule_id}/trigger
+```
+
+手动触发表示立即按 Schedule 配置创建一次 Task，但 Schedule 本身的 cron 规则不变。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `reason` | string | 否 | `manual_trigger` | 触发原因 |
+| `override_input_params` | object | 否 | `null` | 本次触发覆盖 input_params |
+| `override_config` | object | 否 | `null` | 本次触发覆盖 config |
+
+响应应返回本次 ScheduleRun 和新 Task：
+
+```json
+{
+  "data": {
+    "schedule_run": {
+      "id": "schrun_xxx",
+      "status": "task_created",
+      "reason": "manual_trigger"
+    },
+    "task": {
+      "id": "task_xxx",
+      "status": "pending"
+    }
+  }
+}
+```
+
+### 13.9 ScheduleRun 对象字段
+
+ScheduleRun 记录每一次“触发决策”，不只记录成功创建 Task 的情况。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | ScheduleRun ID |
+| `schedule_id` | string | 是 | 所属 Schedule |
+| `bot_id` | string | 是 | 冗余 Bot ID |
+| `planned_at` | string | 是 | 理论计划触发时间 |
+| `triggered_at` | string | 是 | 实际做出触发决策的时间 |
+| `status` | string | 是 | ScheduleRunStatus |
+| `reason` | string | 否 | skipped/failed 的原因，或手动触发原因 |
+| `task_id` | string | 否 | 如果创建了 Task，记录 Task ID |
+| `overlap_policy` | string | 是 | 当时采用的 overlap 策略快照 |
+| `missed_run_policy` | string | 是 | 当时采用的 missed 策略快照 |
+| `error_code` | string | 否 | 创建失败错误码 |
+| `error_message` | string | 否 | 创建失败说明 |
+| `created_at` | string | 是 | 记录创建时间 |
 
 ScheduleRunStatus：
 
-```text
-task_created
-skipped
-failed
-```
+| 值 | 含义 |
+|---|---|
+| `task_created` | 已创建 Task |
+| `skipped` | 本轮触发被策略跳过 |
+| `failed` | 本轮触发尝试失败，例如输入非法或数据库错误 |
 
 常见 reason：
 
-```text
-previous_task_running
-bot_disabled
-invalid_input
-create_task_failed
-missed_run_skipped
-max_parallel_runs_reached
-```
+| reason | 含义 |
+|---|---|
+| `previous_task_running` | 上一轮 active Task 未结束，且 overlap_policy=skip |
+| `bot_disabled` | Bot 当前不可运行 |
+| `invalid_input` | Schedule 配置的输入非法 |
+| `create_task_failed` | 创建 Task 失败 |
+| `missed_run_skipped` | 错过触发且策略选择跳过 |
+| `max_parallel_runs_reached` | 达到并行上限 |
+| `manual_trigger` | 用户手动触发 |
 
 ---
 
-## 13. Result / Artifact / Log API 定稿
+## 14. Result / Artifact / Log API 定稿
 
-### 13.1 Result
+Result、Artifact、Log 分别解决三个不同问题：
+
+| 类型 | 含义 | 示例 |
+|---|---|---|
+| `Result` | 结构化业务结果 | 审批提交结果、订单状态、抓取到的数据记录 |
+| `Artifact` | 文件或大内容 | 截图、Excel 导出、PDF、上传回执 |
+| `Log` | 运行过程和排错信息 | stdout、业务日志、Worker 日志 |
+
+### 14.1 Result API
 
 Result 保存结构化业务结果。
 
@@ -973,34 +1563,61 @@ GET  /api/tasks/{task_id}/items/{item_id}/results
 POST /api/tasks/{task_id}/results/export
 ```
 
-Result 字段：
+Result 对象字段：
 
-```text
-id
-task_id
-task_item_id
-bot_id
-type
-key
-data
-idempotency_key
-created_at
-updated_at
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Result ID |
+| `task_id` | string | 是 | 所属 Task |
+| `task_item_id` | string | 否 | 所属 TaskItem；Task 级结果为空 |
+| `bot_id` | string | 是 | 冗余 Bot ID |
+| `type` | string | 是 | 结果类型，例如 `approval_result`、`crawl_record`、`status_snapshot` |
+| `key` | string | 否 | 业务 key，例如外部订单号、URL、Excel 行号 |
+| `data` | object | 是 | 结构化结果数据，禁止存放大文件内容 |
+| `idempotency_key` | string | 否 | SDK 上报幂等键，同一 Task 内唯一 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+
+查询 Result 列表支持：
+
+| Query 字段 | 类型 | 说明 |
+|---|---|---|
+| `task_id` | string | 按 Task 过滤 |
+| `task_item_id` | string | 按 TaskItem 过滤 |
+| `bot_id` | string | 按 Bot 过滤 |
+| `type` | string | 按结果类型过滤 |
+| `key` | string | 按业务 key 精确查询 |
+| `q` | string | 搜索 key 或 data 摘要 |
+
+导出请求：
+
+```http
+POST /api/tasks/{task_id}/results/export
 ```
 
-导出支持：
+请求字段：
 
-```text
-csv
-xlsx
-json
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `format` | string | 是 | - | `csv`、`xlsx`、`json` |
+| `type` | string | 否 | `null` | 只导出某类 Result |
+| `fields` | array<string> | 否 | 全部字段 | 指定导出字段 |
+| `filters` | object | 否 | `{}` | 导出过滤条件 |
+
+导出结果生成 Artifact，响应返回 Artifact：
+
+```json
+{
+  "data": {
+    "artifact_id": "artifact_export_xxx",
+    "status": "created"
+  }
+}
 ```
 
-导出结果生成 Artifact。
+### 14.2 Artifact API
 
-### 13.2 Artifact
-
-Artifact 保存文件和大内容。
+Artifact 保存文件和大内容，API 只返回元数据，下载接口返回文件内容。
 
 接口：
 
@@ -1012,24 +1629,35 @@ GET /api/tasks/{task_id}/artifacts
 GET /api/tasks/{task_id}/items/{item_id}/artifacts
 ```
 
-Artifact 字段：
+Artifact 对象字段：
 
-```text
-id
-task_id
-task_item_id
-bot_id
-name
-type
-content_type
-size
-storage_backend
-storage_key
-checksum
-idempotency_key
-created_at
-updated_at
-```
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Artifact ID |
+| `task_id` | string | 是 | 所属 Task |
+| `task_item_id` | string | 否 | 所属 TaskItem；Task 级文件为空 |
+| `bot_id` | string | 是 | 冗余 Bot ID |
+| `name` | string | 是 | 文件展示名 |
+| `type` | string | 是 | 文件类型，例如 `screenshot`、`export`、`attachment`、`debug_bundle` |
+| `content_type` | string | 是 | MIME 类型，例如 `image/png` |
+| `size` | integer | 是 | 文件大小，字节 |
+| `storage_backend` | string | 是 | 存储后端，第一版为 `local` |
+| `storage_key` | string | 是 | 后端内部 key，不应直接暴露可访问 URL |
+| `checksum` | string | 否 | 文件校验值，建议 `sha256:<hex>` |
+| `idempotency_key` | string | 否 | SDK 上报幂等键 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+
+Artifact type 推荐值：
+
+| 值 | 含义 |
+|---|---|
+| `screenshot` | 截图 |
+| `download` | 脚本下载到的业务文件 |
+| `upload_receipt` | 外部系统上传/提交回执 |
+| `export` | Result 导出文件 |
+| `debug_bundle` | 失败现场、HAR、日志包等调试文件 |
+| `custom` | 自定义文件 |
 
 第一版存储：
 
@@ -1046,7 +1674,16 @@ minio
 cos
 ```
 
-### 13.3 Log
+下载规则：
+
+```text
+GET /api/artifacts/{artifact_id}/download 必须鉴权
+下载时后端根据权限校验用户是否可访问对应 Task/Bot
+响应头设置 Content-Type 和 Content-Disposition
+不在 Artifact 元数据中直接返回可长期访问的 storage path
+```
+
+### 14.3 Log API
 
 Log 保存运行过程和排错信息。
 
@@ -1061,38 +1698,78 @@ GET /api/tasks/{task_id}/logs/stream
 
 实时日志第一版优先使用 SSE。
 
-Log 字段：
+Log 对象字段：
 
-```text
-id
-task_id
-task_item_id
-bot_id
-worker_id
-level
-message
-fields
-source
-created_at
-```
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `id` | string | 是 | Log ID |
+| `task_id` | string | 是 | 所属 Task |
+| `task_item_id` | string | 否 | 所属 TaskItem |
+| `bot_id` | string | 是 | 冗余 Bot ID |
+| `worker_id` | string | 否 | 产生日志的 Worker |
+| `level` | string | 是 | 日志级别 |
+| `message` | string | 是 | 日志正文，必须脱敏 |
+| `fields` | object | 否 | 结构化字段，必须脱敏 |
+| `source` | string | 是 | 日志来源 |
+| `seq` | integer | 否 | Task 内单调递增序号，用于前端增量加载 |
+| `created_at` | string | 是 | 日志时间 |
 
 level：
 
-```text
-debug
-info
-warning
-error
-```
+| 值 | 含义 |
+|---|---|
+| `debug` | 调试日志 |
+| `info` | 普通信息 |
+| `warning` | 警告 |
+| `error` | 错误 |
 
 source：
 
+| 值 | 含义 |
+|---|---|
+| `script` | Python 脚本输出或 SDK 日志 |
+| `worker` | Worker 执行器日志 |
+| `runtime` | Worker Runtime 日志 |
+| `master` | Master 调度和状态日志 |
+| `system` | 系统生成日志 |
+
+查询日志支持：
+
+| Query 字段 | 类型 | 说明 |
+|---|---|---|
+| `level` | string | 按级别过滤 |
+| `source` | string | 按来源过滤 |
+| `task_item_id` | string | 按 TaskItem 过滤 |
+| `since_seq` | integer | 只返回某个 seq 之后的日志 |
+| `limit` | integer | 返回条数，默认 200，最大 1000 |
+| `q` | string | 搜索 message |
+
+SSE 事件：
+
+```http
+GET /api/tasks/{task_id}/logs/stream
+```
+
+事件建议：
+
 ```text
-script
-worker
-runtime
-master
-system
+event: log
+data: {"id":"log_xxx","seq":12,"level":"info","message":"started"}
+
+event: task_status
+data: {"task_id":"task_xxx","status":"running"}
+
+event: done
+data: {"task_id":"task_xxx","status":"success"}
+```
+
+日志保留策略建议：
+
+```text
+第一版可写数据库
+默认每个 Task 最多保留 10,000 行或保留 7 天
+超过限制时优先丢弃 debug 日志
+error 日志应尽量保留
 ```
 
 日志必须脱敏，敏感字段包括：
@@ -1115,7 +1792,7 @@ private_key
 
 ---
 
-## 14. 数据表结构定稿
+## 15. 数据表结构定稿
 
 第一版正式表清单：
 
@@ -1136,7 +1813,7 @@ task_events
 
 `worker_events` 第一版暂不单独建表，关键 Worker 事件先写入 logs 表。
 
-### 14.1 bots
+### 15.1 bots
 
 字段：
 
@@ -1171,7 +1848,7 @@ index(created_by)
 index(created_at)
 ```
 
-### 14.2 bot_versions
+### 15.2 bot_versions
 
 字段：
 
@@ -1198,7 +1875,7 @@ unique(bot_id, version)
 index(created_at)
 ```
 
-### 14.3 tasks
+### 15.3 tasks
 
 字段：
 
@@ -1273,7 +1950,7 @@ index(assignment_id)
 index(status, priority, created_at)
 ```
 
-### 14.4 task_items
+### 15.4 task_items
 
 字段：
 
@@ -1316,7 +1993,7 @@ index(created_at)
 index(task_id, status, created_at)
 ```
 
-### 14.5 workers
+### 15.5 workers
 
 字段：
 
@@ -1353,7 +2030,7 @@ index(name)
 index(hostname)
 ```
 
-### 14.6 schedules
+### 15.6 schedules
 
 字段：
 
@@ -1389,7 +2066,7 @@ index(created_by)
 index(created_at)
 ```
 
-### 14.7 schedule_runs
+### 15.7 schedule_runs
 
 字段：
 
@@ -1416,7 +2093,7 @@ index(task_id)
 index(created_at)
 ```
 
-### 14.8 results
+### 15.8 results
 
 字段：
 
@@ -1445,7 +2122,7 @@ index(created_at)
 unique(task_id, idempotency_key)
 ```
 
-### 14.9 artifacts
+### 15.9 artifacts
 
 字段：
 
@@ -1478,7 +2155,7 @@ index(created_at)
 unique(task_id, idempotency_key)
 ```
 
-### 14.10 logs
+### 15.10 logs
 
 字段：
 
@@ -1505,7 +2182,7 @@ index(worker_id, created_at)
 index(level, created_at)
 ```
 
-### 14.11 source_files
+### 15.11 source_files
 
 字段：
 
@@ -1542,7 +2219,7 @@ index(created_at)
 index(checksum)
 ```
 
-### 14.12 task_events
+### 15.12 task_events
 
 字段：
 
@@ -1568,7 +2245,7 @@ index(to_status)
 
 ---
 
-## 15. 第一版 MVP 范围裁剪
+## 16. 第一版 MVP 范围裁剪
 
 ### 15.1 MVP 必须实现
 
@@ -1682,7 +2359,7 @@ local storage
 
 ---
 
-## 16. 安全与敏感信息规则
+## 17. 安全与敏感信息规则
 
 第一版安全边界：
 
@@ -1717,7 +2394,7 @@ Cookie
 
 ---
 
-## 17. 第一版最终定稿结论
+## 18. 第一版最终定稿结论
 
 第一版平台定稿为：
 
